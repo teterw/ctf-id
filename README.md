@@ -32,16 +32,25 @@ challenge.png  (48K)
 | Detected type | Category | Suggested tools |
 |---|---|---|
 | ELF | Reverse engineering / pwn | checksec, Ghidra, radare2, gdb+GEF, pwntools, ROPgadget, one_gadget |
-| PE / MS-DOS | Windows reverse engineering | Ghidra, radare2, strings (ILSpy for .NET) |
+| PE / MS-DOS | Windows reverse engineering | Ghidra, radare2, strings; ilspycmd when it detects .NET |
+| Mach-O | macOS reverse engineering | Ghidra, radare2, otool |
+| WebAssembly | Reverse engineering | wasm2wat, wasm-decompile, Ghidra |
 | Python / .pyc | Source / bytecode | uncompyle6, decompyle3, pycdc |
 | JAR / APK / DEX | Decompiling | jadx, apktool |
 | ZIP / 7z / tar / gz / rar | Archives | 7z, bsdtar, zip2john, fcrackzip |
 | PNG / JPEG / GIF / BMP | Steganography | exiftool, zsteg, steghide, stegseek, stegsolve, binwalk |
 | WAV / MP3 / FLAC / OGG | Audio steganography | sox spectrogram, steghide |
 | PDF | Documents | pdftotext, pdfdetach, pdf2john, qpdf |
+| Word / Excel / PowerPoint (OOXML + OLE) | Macros / hidden content | olevba, oleid, office2john |
+| SQLite | Databases | sqlite3 `.dump`, recovering deleted rows |
+| KeePass | Password cracking | keepass2john, keepassxc-cli |
+| Email (.eml) | Headers / attachments | munpack |
 | pcap / pcapng | Network | Wireshark, tshark, tcpflow |
 | Keys / certificates | Crypto | RsaCtfTool, openssl, ssh2john |
 | Disk / filesystem images | Forensics | sleuthkit, testdisk, volatility3 |
+| Large unidentified files | Memory dumps | volatility3 |
+| Windows event logs / registry hives | Windows forensics | evtx_dump, chainsaw, regripper, secretsdump |
+| Git repository (directory) | History forensics | `git log --all -p`, reflog, stash, fsck, git-dumper |
 | Text | Encoding / crypto | CyberChef, name-that-hash, xortool |
 | Unknown data | Carving | xxd, binwalk, foremost |
 
@@ -100,6 +109,10 @@ By default `ctf-id` never runs anything on the file. With `-r` / `--run`, it als
 | PDF | `exiftool`, `pdfdetach -list`, `pdftotext` |
 | pcap | `tshark` protocol breakdown, HTTP requests, FTP/HTTP credentials |
 | Archives | `7z` listing and a count of encrypted entries |
+| Images | `zbarimg` to read QR codes and barcodes |
+| SQLite | tables, plus any rows mentioning flag/pass/secret |
+| Office | `oleid`, `olevba --decode` |
+| Git repository | all commits, secrets in the diff history, stashes |
 
 ```
 $ ctf-id -r challenge.png

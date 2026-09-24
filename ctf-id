@@ -16,7 +16,7 @@ if [ -t 1 ]; then
   C=$'\e[36m'; Y=$'\e[33m'; G=$'\e[32m'; M=$'\e[35m'; RED=$'\e[31m'
 else B=; DIM=; R=; C=; Y=; G=; M=; RED=; fi
 
-VERSION=1.5.0
+VERSION=1.6.0
 usage(){ cat <<EOF
 usage: ctf-id [options] <file> [file2 ...]
   -q           quick: skip entropy and binwalk
@@ -100,6 +100,19 @@ wireshark|wireshark|wireshark|wireshark|wireshark-qt|wireshark|-
 xxd|xxd|xxd|vim-common|xxd|vim|-
 zip2john|zip2john|john|john|john|john-jumbo|john-jumbo: https://github.com/openwall/john
 zsteg|zsteg|-|-|-|-|gem install zsteg
+zbarimg|zbarimg|zbar-tools|zbar|zbar|zbar|-
+olevba|olevba|-|-|-|-|pip install oletools
+oleid|oleid|-|-|-|-|pip install oletools
+sqlite3|sqlite3|sqlite3|sqlite|sqlite|sqlite|-
+office2john|office2john office2john.py|john|john|john|john-jumbo|john-jumbo: https://github.com/openwall/john
+keepass2john|keepass2john|john|john|john|john-jumbo|john-jumbo: https://github.com/openwall/john
+keepassxc-cli|keepassxc-cli|keepassxc|keepassxc|keepassxc|keepassxc|-
+wasm2wat|wasm2wat wasm-decompile|wabt|wabt|wabt|wabt|-
+ilspycmd|ilspycmd|-|-|-|-|dotnet tool install -g ilspycmd
+evtx_dump|evtx_dump evtx_dump.py chainsaw|-|-|-|-|pip install python-evtx
+regripper|regripper rip.pl|regripper|-|-|-|https://github.com/keydet89/RegRipper3.0
+git|git|git|git|git|git|-
+munpack|munpack|mpack|-|-|mpack|-
 '
 
 PM=""
@@ -591,12 +604,94 @@ PY
     tool "pwninit"      "auto-patch binary to a given libc (if provided)"
     ;;
 
+  *"Mach-O"*)
+    h "Mach-O (macOS) binary → REVERSE ENGINEERING"
+    tool "Ghidra"    "decompiles Mach-O fine"; cmd "ghidra"
+    tool "radare2"   "disassemble"; cmd "r2 -AA $f"
+    tool "strings"   "hardcoded secrets"; cmd "strings -n8 $f | less"
+    note "on a Mac: otool -tV $f (disassembly), otool -L (libraries), nm -m (symbols)"
+    ;;
+
+  *"WebAssembly"*)
+    h "WebAssembly → REVERSE ENGINEERING"
+    tool "wasm2wat"  "readable text format / pseudo-C"; cmd "wasm2wat $f -o out.wat  &&  wasm-decompile $f -o out.dcmp"
+    tool "Ghidra"    "with the ghidra-wasm-plugin"; cmd "ghidra"
+    note "look for exported functions called from the page's JS: that's the check you have to pass"
+    ;;
+
+  *"SQLite"*)
+    h "SQLite database → DUMP IT"
+    tool "sqlite3"   "list tables, dump everything"; cmd "sqlite3 $f .tables"; cmd "sqlite3 $f .dump | grep -iE 'flag|pass|ctf'"
+    note "deleted rows can survive in free pages → strings $f | grep -i flag, or undark / sqlite-deleted-records-parser"
+    ;;
+
+  *"Keepass"*|*"KeePass"*)
+    h "KeePass database → CRACK THE MASTER PASSWORD"
+    tool "keepass2john" "extract the hash"; cmd "keepass2john $f > kp.hash && john --wordlist=rockyou.txt kp.hash"
+    note "KDBX4 (Argon2) needs a recent john-jumbo, or hashcat -m 13400 for KDBX3"
+    tool "keepassxc-cli" "open it once cracked"; cmd "keepassxc-cli ls -R $f"
+    ;;
+
+  *"Microsoft Word 2007"*|*"Microsoft Excel 2007"*|*"Microsoft PowerPoint 2007"*|*"Microsoft OOXML"*|*"Composite Document File"*|*"OpenDocument"*)
+    h "Office document → MACROS / HIDDEN CONTENT"
+    tool "olevba"    "extract and analyse VBA macros (malware-style challenges)"; cmd "olevba --decode $f"
+    tool "oleid"     "quick triage: macros? encryption? external links?"; cmd "oleid $f"
+    tool "exiftool"  "author, company, last-modified-by"; cmd "exiftool $f"
+    if [[ "$ft" != *Composite* ]]; then
+      tool "7z"      "it's a ZIP inside: look at the XML, media and hidden sheets"; cmd "7z x $f -odoc_extracted && grep -ril flag doc_extracted"
+    fi
+    tool "office2john" "if it's password-protected"; cmd "office2john.py $f > h.txt && john h.txt"
+    ;;
+
+  *"Event Log"*)
+    h "Windows event log → FORENSICS"
+    tool "evtx_dump"  "convert to readable XML/JSON"; cmd "evtx_dump.py $f > events.xml"
+    note "hunt for 4624/4625 (logons), 4688 (process creation), 7045 (new service), 4104 (PowerShell script blocks)"
+    note "chainsaw / hayabusa run Sigma detection rules over it"
+    ;;
+
+  *"registry file"*)
+    h "Windows registry hive → FORENSICS"
+    tool "regripper"  "run every plugin over the hive"; cmd "regripper -r $f -a > report.txt"
+    note "interesting keys: Run/RunOnce (persistence), UserAssist, RecentDocs, TypedPaths, SAM → hashes (with SYSTEM)"
+    note "SAM + SYSTEM hives → impacket-secretsdump -sam SAM -system SYSTEM LOCAL"
+    ;;
+
+  *"news or mail"*|*"RFC 822 mail"*|*"SMTP mail"*)
+    h "Email → HEADERS / ATTACHMENTS"
+    tool "munpack"    "extract attachments"; cmd "munpack -t $f"
+    note "read the headers: Received chain, X-Originating-IP, Reply-To vs From (phishing challenges)"
+    note "base64 blocks in the body are attachments — ctf-id each one once extracted"
+    ;;
+
+  *directory*)
+    if [ -d "$f/.git" ] || { [ -f "$f/HEAD" ] && [ -d "$f/objects" ]; }; then
+      h "Git repository → HISTORY FORENSICS"
+      tool "git"      "secrets usually live in old commits, other branches or stashes"
+      cmd "git -C $f log --all --oneline --graph"
+      cmd "git -C $f log --all -p | grep -iE 'flag|pass|secret|key'"
+      cmd "git -C $f stash list; git -C $f reflog"
+      cmd "git -C $f fsck --lost-found     # dangling commits/blobs"
+      note "exposed /.git on a website? dump it first: git-dumper http://host/.git/ out"
+    else
+      h "Directory"
+      note "run ctf-id on the files inside:"; cmd "ctf-id $f/*"
+      note "or unpack everything nested: ctf-id -d $f/*"
+    fi
+    ;;
+
   *"PE32"*|*"MS-DOS"*|*"MSI "*|*"for MS Windows"*)
     h "Windows executable → REVERSE ENGINEERING"
     tool "Ghidra"    "decompile (works on PE too)"; cmd "ghidra"
     tool "radare2"   "disassemble"; cmd "r2 -AA $f"
     tool "strings"   "look for URLs, keys, flags"; cmd "strings -n8 $f | less"
-    note "if .NET: use ilspycmd/dnSpy instead — Ghidra struggles with IL"
+    if [[ "$ft" == *".Net"* || "$ft" == *".NET"* ]]; then
+      note "${G}.NET assembly → decompiles back to near-original C#${R}"
+      tool "ilspycmd" "C# decompiler (CLI)"; cmd "ilspycmd -p -o out $f"
+      note "on Windows, dnSpy lets you edit and re-run the IL — patch the check out"
+    else
+      note "if it's .NET: use ilspycmd/dnSpy instead — Ghidra struggles with IL"
+    fi
     ;;
 
   *"Python script"*|*"python"*|*"byte-compiled"*|*.pyc)
@@ -691,6 +786,10 @@ PY
   *"data"*|*"raw"*)
     h "Unknown / raw data → CARVE & IDENTIFY"
     note "'data' means file(1) couldn't ID it — inspect the bytes yourself:"
+    if [ "${sz:-0}" -gt 100000000 ]; then
+      note "${G}large unidentified file → probably a MEMORY DUMP${R}"
+      tool "volatility3" "memory forensics"; cmd "vol -f $f windows.info   # or linux.bash / windows.pslist / windows.cmdline"
+    fi
     tool "xxd"        "look at the header magic bytes"; cmd "xxd $f | head"
     tool "binwalk"    "find embedded/known signatures"; cmd "binwalk $f"
     tool "foremost"   "carve out known file types"; cmd "foremost -i $f -o carved/"
@@ -727,7 +826,7 @@ PY
   esac
 
   # ---- --run: execute the safe, read-only first checks -----------------------
-  [ "$RUN" -eq 1 ] && [ -f "$f" ] && run_checks "$f" "$ft"
+  [ "$RUN" -eq 1 ] && [ -e "$f" ] && run_checks "$f" "$ft"
 
   # ---- binwalk embedded-file summary (all types, unless -q) ---------------
   if [ "$QUICK" -eq 0 ] && command -v binwalk >/dev/null && [ -f "$f" ]; then
@@ -789,12 +888,14 @@ run_checks(){
       runp "interesting strings" 12 strings "strings -n5 \"\$1\" | grep -iE 'flag|passw|secret|/bin/sh|cat |\\.txt' | sort -u" "$f" ;;
     *"PNG image"*|*"bitmap"*)
       runc exiftool 12 exiftool -S -Comment -Description -Title -Author -Artist -Software -Warning -ImageSize "$f"
+      runc "QR/barcode" 4 zbarimg -q "$f"
       runp zsteg 12 zsteg "zsteg \"\$1\" 2>&1 | grep -vE ' \\.\\.( |\$)|^\\s*\$'" "$f"
       if [[ "$ft" == *bitmap* ]]; then
         ensure_run_dir; d=$RUN_DIR
         runc "steghide (empty password)" 4 steghide extract -sf "$f" -p "" -xf "$d/steghide.out" -f
       fi ;;
     *"JPEG image"*|*"GIF image"*|*"Web/P"*|*"WebP"*)
+      runc "QR/barcode" 4 zbarimg -q "$f"
       runc exiftool 12 exiftool -S -Comment -Description -Title -Author -Artist -Software -Warning -ImageSize -GPSPosition "$f"
       ensure_run_dir; d=$RUN_DIR
       runc "steghide (empty password)" 4 steghide extract -sf "$f" -p "" -xf "$d/steghide.out" -f ;;
@@ -816,6 +917,18 @@ run_checks(){
     *"Zip archive"*|*"7-zip"*|*"RAR "*|*"gzip"*|*"bzip2"*|*"XZ "*|*"tar archive"*)
       runc "archive listing" 20 7z l -ba "$f"
       runp "encrypted entries" 5 7z "7z l -slt \"\$1\" | grep -c 'Encrypted = +'" "$f" ;;
+    *directory*)
+      if [ -d "$f/.git" ]; then
+        runc "all commits" 15 git -C "$f" log --all --oneline
+        runp "secrets in history" 10 git "git -C \"\$1\" log --all -p | grep -iE '^[+-].*(flag|pass|secret|key)' | sort -u" "$f"
+        runc stashes 5 git -C "$f" stash list
+      else note "--run: nothing to run on a plain directory"; fi ;;
+    *SQLite*)
+      runc tables 20 sqlite3 "$f" .tables
+      runp "rows mentioning flag/pass" 10 sqlite3 "sqlite3 \"\$1\" .dump | grep -iE 'flag|pass|secret|ctf' " "$f" ;;
+    *"Microsoft Word 2007"*|*"Microsoft Excel 2007"*|*"Microsoft PowerPoint 2007"*|*"Microsoft OOXML"*|*"Composite Document File"*)
+      runc oleid 20 oleid "$f"
+      runc olevba 25 olevba --decode "$f" ;;
     *)
       runc exiftool 8 exiftool -S -Comment -Description -Title -Author -Warning "$f" ;;
   esac

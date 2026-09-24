@@ -124,6 +124,28 @@ if command -v 7z >/dev/null || command -v bsdtar >/dev/null; then
   reject "tar holding a zip ≠ broken zip"  "Broken ZIP"        -q "$T/nest/outer.tar"
 fi
 
+echo "more file types"
+python3 - "$T" <<'PY'
+import sys, sqlite3, zipfile
+d = sys.argv[1]
+c = sqlite3.connect(f'{d}/db.sqlite'); c.execute('create table users(name,pw)')
+c.execute("insert into users values('admin','flag{sql}')"); c.commit(); c.close()
+z = zipfile.ZipFile(f'{d}/doc.docx', 'w')
+z.writestr('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+z.writestr('word/document.xml', '<w:document/>'); z.close()
+open(f'{d}/mod.wasm', 'wb').write(b'\0asm\x01\0\0\0')
+open(f'{d}/hive', 'wb').write(b'regf' + b'\0' * 4092)
+open(f'{d}/mail.eml', 'w').write('From: a@b.c\nTo: d@e.f\nSubject: hi\nMIME-Version: 1.0\nContent-Type: text/plain\n\nbody\n')
+PY
+mkdir -p "$T/repo" && git -C "$T/repo" init -q 2>/dev/null
+expect "SQLite → dump"                  "SQLite database"        -q "$T/db.sqlite"
+expect "docx → Office, not plain ZIP"   "Office document"        -q "$T/doc.docx"
+expect "WebAssembly"                    "WebAssembly"            -q "$T/mod.wasm"
+expect "registry hive"                  "registry hive"          -q "$T/hive"
+expect "email"                          "Email"                  -q "$T/mail.eml"
+expect "git repo directory"             "Git repository"         -q "$T/repo"
+command -v sqlite3 >/dev/null && expect "--run dumps SQLite flag" "★ possible flag: flag{sql}" -q -r "$T/db.sqlite"
+
 echo
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]
