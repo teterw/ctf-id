@@ -73,6 +73,30 @@ reject "plain English → no false flag" "★ FLAG"                             
 reject "JWT → no false flag"           "★ FLAG"                             -q "$T/jwt.txt"
 expect "custom flag format via -f"     "rot13): XYZ{custom_format}"         -q -f XYZ "$T/custom.txt"
 
+echo "structure checks"
+python3 - "$T" <<'PY'
+import sys, zlib, struct
+d = sys.argv[1]
+def chunk(t, b): return struct.pack('>I', len(b)) + t + b + struct.pack('>I', zlib.crc32(t + b) & 0xffffffff)
+raw = b''.join(b'\0' + b'\xff\0\0' * 4 for _ in range(6))
+png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 4, 6, 8, 2, 0, 0, 0))
+       + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+w = lambda n, b: open(f'{d}/{n}', 'wb').write(b)
+w('good.png', png)
+t = bytearray(png); t[20:24] = struct.pack('>I', 3); w('tall.png', t)
+w('badhdr.png', b'\0' * 8 + png[8:])
+w('append.png', png + b'PK\x03\x04secretzipdata')
+w('rev.png', png[::-1])
+w('xor.png', bytes(b ^ 0x42 for b in png))
+PY
+expect "tampered PNG height recovered"  "the real size is 4x6"   -q "$T/tall.png"
+expect "broken PNG signature"           "Broken PNG header"      -q "$T/badhdr.png"
+expect "zip appended after IEND"        "looks like a ZIP"       -q "$T/append.png"
+expect "reversed file"                  "Reversed file"          -q "$T/rev.png"
+expect "single-byte XOR"                "0x42"                   -q "$T/xor.png"
+reject "clean PNG → no structure alarm" "Structure check"        -q "$T/good.png"
+reject "ELF → no structure alarm"       "Structure check"        -q /bin/ls
+
 echo
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]

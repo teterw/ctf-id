@@ -75,6 +75,18 @@ To find a flag, it tries chains of up to 3 decoders (base64, base32, hex, binary
 ctf-id -f DUCTF challenge.txt
 ```
 
+## Structure checks
+
+CTF authors often damage a file on purpose so that `file` just reports `data`. `ctf-id` checks for this and shows how to undo it:
+
+| Trick | What ctf-id reports |
+|---|---|
+| Magic bytes overwritten (PNG, JPEG, WAV, ZIP, PDF, ELF) | the original type, plus a `printf \| dd` command that writes the correct bytes back |
+| PNG height or width edited | brute-forces the IHDR CRC to find the **real dimensions**, plus the command to patch them |
+| Data appended after `IEND`, `FF D9`, GIF trailer or `%%EOF` | the offset, the type of the hidden data, and a `dd` command to cut it out |
+| Whole file reversed | detects it and gives a one-liner to reverse it back |
+| Whole file XOR-ed with a single byte | finds the key and gives a one-liner to decode it |
+
 ## Install
 
 ```bash
