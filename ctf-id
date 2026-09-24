@@ -70,7 +70,7 @@ PY
   # ---- flags / strings quick win ------------------------------------------
   local hits
   hits=$(strings -n6 "$f" 2>/dev/null | grep -aoE "$FLAG_RE" | sort -u | head -5)
-  [ -n "$hits" ] && { note "${G}possible flag(s) already in plain strings:${R}"; printf '        %s\n' $hits; }
+  [ -n "$hits" ] && { note "${G}possible flag(s) already in plain strings:${R}"; printf '%s\n' "$hits" | sed 's/^/        /'; }
 
   # ============ TYPE-SPECIFIC ADVICE =======================================
   case "$ft" in
@@ -119,7 +119,7 @@ PY
     fi
     ;;
 
-  *"Java "*|*"Java archive"*|*"Zip archive"*|*"Android package"*|*"Dalvik"*)
+  *"Java "*|*"Zip archive"*|*"Android package"*|*"Dalvik"*)
     if [[ "$ft" == *"Java"* || "$ft" == *"Android"* || "$ft" == *"Dalvik"* || "$f" == *.jar || "$f" == *.apk || "$f" == *.dex ]]; then
       h "JVM / Android → DECOMPILE"
       tool "jadx-gui"  "best Java/APK decompiler (GUI)"; cmd "jadx-gui $f"
@@ -142,7 +142,7 @@ PY
     note "nested archives are common — extract, then run ctf-id on the result"
     ;;
 
-  *"PNG image"*|*"JPEG image"*|*"GIF image"*|*"bitmap"*|*"PC bitmap"*|*"Web/P"*|*"WebP"*)
+  *"PNG image"*|*"JPEG image"*|*"GIF image"*|*"bitmap"*|*"Web/P"*|*"WebP"*)
     h "Image → STEGANOGRAPHY / METADATA"
     tool "exiftool"   "metadata, comments, GPS — check FIRST"; cmd "exiftool $f"
     tool "strings"    "flags hidden as plain text"; cmd "strings $f | grep -iE 'flag|ctf|\\{'"
@@ -173,7 +173,7 @@ PY
     tool "qpdf"       "decrypt once you know the pw"; cmd "qpdf --password=PW --decrypt $f out.pdf"
     ;;
 
-  *"pcap"*|*"tcpdump"*|*"capture file"*|*"pcapng"*)
+  *"pcap"*|*"tcpdump"*|*"capture file"*)
     h "Network capture → TRAFFIC ANALYSIS"
     tool "Wireshark"  "GUI: Follow TCP Stream, File>Export Objects"; cmd "wireshark $f"
     tool "tshark"     "CLI filtering / field extraction"; cmd "tshark -r $f -Y http.request -T fields -e http.host -e http.request.uri"
