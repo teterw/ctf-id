@@ -26,6 +26,7 @@ challenge.png  (48K)
 - Calculates Shannon entropy, where a high value suggests compressed, encrypted or packed data
 - Looks for strings shaped like `flag{...}` or `CTF{...}` that are already in plain text
 - Uses `binwalk` to find embedded files
+- **Reads text files and works out what's in them** (see below). When a flag is hidden under layers of encoding, it decodes them and prints the flag
 - Recommends tools and ready-to-run commands for the file type:
 
 | Detected type | Category | Suggested tools |
@@ -43,6 +44,36 @@ challenge.png  (48K)
 | Disk / filesystem images | Forensics | sleuthkit, testdisk, volatility3 |
 | Text | Encoding / crypto | CyberChef, name-that-hash, xortool |
 | Unknown data | Carving | xxd, binwalk, foremost |
+
+## Text analysis
+
+`ctf-id` doesn't stop at "it's text". It reads the contents and tells you what they are:
+
+```
+$ ctf-id secret.txt
+▶ Text → ENCODING / CRYPTO / CODE
+
+  ★ FLAG (decoded via base64 → hex → rot13): flag{layers_all_the_way_down}
+```
+
+It recognises:
+
+| Content | Example |
+|---|---|
+| Base64, Base32, Ascii85, hex, binary, decimal, octal, URL encoding | `ZmxhZ3t...`, `01101000 01101001` |
+| Morse code | `.... . .-.. .-.. ---` |
+| Caesar / ROT-n (it tries all 25 shifts and scores them for English) | `Wkh vhfuhw phhwlqj` |
+| Substitution or Vigenère (from the index of coincidence) | letters only, no English words |
+| Hashes: MD5/NTLM, SHA-1/224/256/384/512, bcrypt, md5crypt, sha256/512crypt, yescrypt, NetNTLMv2 | prints the right `hashcat -m` mode |
+| JWT | shows the decoded header and common attacks |
+| RSA values `n`, `e`, `c`, `p`, `q` | flags small e, huge e (Wiener), and small n that can be factored |
+| Brainfuck, Ook!, uuencode, zero-width characters, whitespace steganography | |
+
+To find a flag, it tries chains of up to 3 decoders (base64, base32, hex, binary, rot13, rot47, atbash, reverse, and more), plus all Caesar shifts. Out of the box it looks for `flag{…}`, `CTF{…}`, `HTB{…}` and `THM{…}`. For any other event's format, use `-f`:
+
+```bash
+ctf-id -f DUCTF challenge.txt
+```
 
 ## Install
 
@@ -66,6 +97,7 @@ You can also download it from the [latest release](https://github.com/teterw/ctf
 ```bash
 ctf-id <file> [file2 ...]   # full analysis
 ctf-id -q <file>            # quick: skip entropy and binwalk
+ctf-id -f PREFIX <file>     # also hunt for PREFIX{...} flags
 ctf-id --version
 ```
 

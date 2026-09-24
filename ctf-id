@@ -16,15 +16,27 @@ if [ -t 1 ]; then
   C=$'\e[36m'; Y=$'\e[33m'; G=$'\e[32m'; M=$'\e[35m'; RED=$'\e[31m'
 else B=; DIM=; R=; C=; Y=; G=; M=; RED=; fi
 
-VERSION=1.0.0
-usage(){ echo "usage: ctf-id [-q] <file> [file2 ...]   (-q: skip entropy/binwalk, -V: version)"; }
+VERSION=1.1.0
+usage(){ cat <<EOF
+usage: ctf-id [options] <file> [file2 ...]
+  -q           quick: skip entropy and binwalk
+  -f PREFIX    flag format to hunt for, e.g. -f DUCTF  (flag/ctf/htb/thm are built in)
+  -V           print version
+EOF
+}
 
-QUICK=0
-case "${1:-}" in
-  -h|--help)    usage; exit 0 ;;
-  -V|--version) echo "ctf-id $VERSION"; exit 0 ;;
-  -q)           QUICK=1; shift ;;
-esac
+QUICK=0; FLAGFMT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)    usage; exit 0 ;;
+    -V|--version) echo "ctf-id $VERSION"; exit 0 ;;
+    -q)           QUICK=1; shift ;;
+    -f)           FLAGFMT="${2:-}"; shift 2 ;;
+    --)           shift; break ;;
+    -*)           echo "unknown option: $1"; usage; exit 1 ;;
+    *)            break ;;
+  esac
+done
 [ $# -eq 0 ] && { usage; exit 1; }
 
 hr(){ printf '%s\n' "${DIM}────────────────────────────────────────────────────────${R}"; }
@@ -34,6 +46,256 @@ cmd(){  printf '     %s$ %s%s\n' "$G" "$*" "$R"; }              # runnable comma
 note(){ printf '  %s• %s%s\n' "$Y" "$*" "$R"; }
 
 FLAG_RE='[A-Za-z0-9_]{2,}\{[^}]{2,}\}'   # generic flag{...} / CTF{...} shape
+
+# ---- text content analysis -------------------------------------------------
+# Prints tab-separated records: F=decoded flag, T=tool/finding, C=command, N=note.
+analyze_text(){
+  command -v python3 >/dev/null || return 0
+  python3 - "$1" "$1" "$FLAGFMT" <<'PY' 2>/dev/null
+import sys, re, base64, binascii, codecs, urllib.parse, collections, string
+
+path, fname = sys.argv[1], sys.argv[2]
+extra = re.escape(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else 'flag'
+# a *decoded* candidate must look like a real flag, or random bytes produce noise
+FLAG = re.compile(r'(?i)\b[a-z0-9_]*(?:flag|ctf|htb|thm|' + extra + r')[a-z0-9_]*\{[\w\-!?@#$%^&*.,:;+=\' ]{2,}\}')
+raw = open(path, 'rb').read(200_000)
+text = raw.decode('utf-8', 'replace').strip()
+compact = re.sub(r'\s+', '', text)
+out = []
+def T(name, desc): out.append(f"T\t{name}\t{desc}")
+def C(cmd):        out.append(f"C\t{cmd}")
+def N(msg):        out.append(f"N\t{msg}")
+
+def printable(b):
+    if not b: return False
+    if isinstance(b, bytes):
+        try: b = b.decode('utf-8')
+        except UnicodeDecodeError: return False
+    ok = sum(ch in string.printable for ch in b)
+    return ok / len(b) > 0.95
+
+def preview(b, n=70):
+    s = (b.decode('utf-8', 'replace') if isinstance(b, bytes) else b).strip()
+    s = ''.join(ch if ch.isprintable() else '·' for ch in s)
+    return s[:n] + ('…' if len(s) > n else '')
+
+# ---------------------------------------------------------------- decoders
+MORSE = {'.-':'A','-...':'B','-.-.':'C','-..':'D','.':'E','..-.':'F','--.':'G','....':'H',
+ '..':'I','.---':'J','-.-':'K','.-..':'L','--':'M','-.':'N','---':'O','.--.':'P','--.-':'Q',
+ '.-.':'R','...':'S','-':'T','..-':'U','...-':'V','.--':'W','-..-':'X','-.--':'Y','--..':'Z',
+ '-----':'0','.----':'1','..---':'2','...--':'3','....-':'4','.....':'5','-....':'6',
+ '--...':'7','---..':'8','----.':'9','..--.-':'_','-.--.':'{','-.--.-':'}','-.-.--':'!'}
+
+def d_b64(s):
+    c = re.sub(r'\s+', '', s)
+    if len(c) < 8 or not re.fullmatch(r'[A-Za-z0-9+/\-_]+={0,2}', c): return None
+    c += '=' * (-len(c) % 4)
+    try: return base64.b64decode(c.replace('-', '+').replace('_', '/'), validate=True)
+    except (binascii.Error, ValueError): return None
+def d_b32(s):
+    c = re.sub(r'\s+', '', s).upper()
+    if len(c) < 8 or not re.fullmatch(r'[A-Z2-7]+=*', c): return None
+    try: return base64.b32decode(c + '=' * (-len(c) % 8))
+    except (binascii.Error, ValueError): return None
+def d_b85(s):
+    c = s.strip()
+    try:
+        if c.startswith('<~') and c.endswith('~>'): return base64.a85decode(c, adobe=True)
+    except ValueError: return None
+    return None
+def d_hex(s):
+    c = re.sub(r'(0x|\\x|[\s:,])', '', s)
+    if len(c) < 4 or len(c) % 2 or not re.fullmatch(r'[0-9a-fA-F]+', c): return None
+    return bytes.fromhex(c)
+def d_bin(s):
+    c = re.sub(r'\s+', '', s)
+    if len(c) < 8 or len(c) % 8 or not re.fullmatch(r'[01]+', c): return None
+    return bytes(int(c[i:i+8], 2) for i in range(0, len(c), 8))
+def d_dec(s):
+    parts = re.split(r'[\s,]+', s.strip())
+    if len(parts) < 4 or not all(p.isdigit() and 0 < int(p) < 256 for p in parts): return None
+    return bytes(int(p) for p in parts)
+def d_oct(s):
+    parts = s.split()
+    if len(parts) < 4 or not all(re.fullmatch(r'[0-7]{3}', p) for p in parts): return None
+    return bytes(int(p, 8) % 256 for p in parts)
+def d_url(s):
+    return urllib.parse.unquote(s).encode() if re.search(r'%[0-9A-Fa-f]{2}', s) else None
+def d_morse(s):
+    if not re.fullmatch(r'[.\-/\s|_]+', s.strip()) or '.' not in s or '-' not in s: return None
+    words = re.split(r'\s*[/|]\s*|\s{3,}', s.strip())
+    return ' '.join(''.join(MORSE.get(ch, '?') for ch in w.split()) for w in words).encode()
+def d_rot13(s):  return codecs.encode(s, 'rot13').encode() if re.search(r'[A-Za-z]', s) else None
+def d_rot47(s):  return ''.join(chr(33 + (ord(ch) - 33 + 47) % 94) if 33 <= ord(ch) <= 126 else ch for ch in s).encode()
+def d_rev(s):    return s[::-1].encode()
+def d_atbash(s): return s.translate(str.maketrans(string.ascii_letters, string.ascii_lowercase[::-1] + string.ascii_uppercase[::-1])).encode()
+
+DECODERS = [('base64', d_b64), ('base32', d_b32), ('base85', d_b85), ('hex', d_hex),
+            ('binary', d_bin), ('decimal', d_dec), ('octal', d_oct), ('url', d_url),
+            ('morse', d_morse), ('rot13', d_rot13), ('rot47', d_rot47),
+            ('reverse', d_rev), ('atbash', d_atbash)]
+
+def caesar(s, k):
+    return ''.join(chr((ord(ch) - b + k) % 26 + b) if ch.isalpha() and ch.isascii() else ch
+                   for ch in s for b in [65 if ch.isupper() else 97])
+
+# ---------------------------------------------- 1. search decode chains for a flag
+def search(s, depth=3):
+    seen, frontier = {s}, [(s, [])]
+    for _ in range(depth):
+        nxt = []
+        for cur, chain in frontier:
+            for name, fn in DECODERS:
+                if chain and chain[-1] == name and name in ('rot13', 'reverse', 'atbash', 'rot47'): continue
+                try: r = fn(cur)
+                except Exception: r = None
+                if not r or not printable(r): continue
+                r = r.decode('utf-8').strip()
+                if r in seen or len(r) < 4: continue
+                seen.add(r)
+                m = FLAG.search(r)
+                if m and m.group(0) not in direct: return chain + [name], m.group(0)
+                nxt.append((r, chain + [name]))
+        frontier = nxt[:400]
+    for k in range(1, 26):
+        m = FLAG.search(caesar(s, k))
+        if m and m.group(0) not in direct: return [f'caesar shift {k}'], m.group(0)
+    return None
+
+direct = set(FLAG.findall(text))
+if len(text) <= 20_000:
+    hit = search(text)
+    if hit:
+        chain, flag = hit
+        out.append(f"F\t{' → '.join(chain)}\t{flag}")
+
+# ---------------------------------------------- 2. recognise the format
+found = False
+def rule(name, desc, *cmds, notes=()):
+    global found; found = True
+    T(name, desc)
+    for c in cmds: C(c)
+    for n in notes: N(n)
+
+tok = compact
+HASHES = [(r'\$2[abxy]\$\d\d\$[./A-Za-z0-9]{53}', 'bcrypt', 3200),
+          (r'\$6\$[^$]{1,16}\$[./A-Za-z0-9]{86}', 'sha512crypt', 1800),
+          (r'\$5\$[^$]{1,16}\$[./A-Za-z0-9]{43}', 'sha256crypt', 7400),
+          (r'\$1\$[^$]{1,8}\$[./A-Za-z0-9]{22}', 'md5crypt', 500),
+          (r'\$apr1\$[^$]{1,8}\$[./A-Za-z0-9]{22}', 'Apache apr1', 1600),
+          (r'\$y\$[^$]+\$[^$]+\$[./A-Za-z0-9]{43}', 'yescrypt', None),
+          (r'[A-Za-z0-9._-]+::[^:]+:[0-9a-fA-F]{16}:[0-9a-fA-F]{32}:[0-9a-fA-F]+', 'NetNTLMv2', 5600)]
+for rx, name, mode in HASHES:
+    if re.search(rx, text):
+        if mode: rule(f"{name} hash", "crack it against a wordlist", f"hashcat -m {mode} {fname} rockyou.txt", f"john --wordlist=rockyou.txt {fname}")
+        else:    rule(f"{name} hash", "hashcat can't do this one — use john", f"john --format=crypt --wordlist=rockyou.txt {fname}")
+        break
+
+HEXLEN = {32: ('MD5 or NTLM', '0 (MD5) / 1000 (NTLM)'), 40: ('SHA-1', '100'), 56: ('SHA-224', '1300'),
+          64: ('SHA-256', '1400'), 96: ('SHA-384', '10800'), 128: ('SHA-512', '1700')}
+lines = [l.strip() for l in text.splitlines() if l.strip()]
+if not found and lines and all(re.fullmatch(r'(?:[^:\s]+:)?[0-9a-fA-F]+', l) for l in lines[:50]):
+    lens = {len(l.split(':')[-1]) for l in lines[:50]}
+    if len(lens) == 1 and (L := lens.pop()) in HEXLEN:
+        kind, mode = HEXLEN[L]
+        rule(f"{kind} hash", f"{len(lines)} hash(es) of {L} hex chars",
+             f"hashcat -m {mode.split()[0]} {fname} rockyou.txt",
+             notes=[f"hashcat mode {mode}", "try an online lookup first: crackstation.net / hashes.com"])
+
+if re.search(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*', text):
+    m = re.search(r'eyJ[A-Za-z0-9_-]+', text)
+    hdr = (d_b64(m.group(0)) or b'').decode('utf-8', 'replace')
+    rule("JWT", f"JSON Web Token, header: {preview(hdr, 60)}",
+         "jwt_tool <token>            # decode + test known attacks",
+         f"hashcat -m 16500 {fname} rockyou.txt   # crack an HS256 secret",
+         notes=["try alg=none, RS256→HS256 key confusion, and a weak HMAC secret"])
+
+nums = dict(re.findall(r'(?im)^\s*([a-z]{1,4}\d?)\s*[:=]\s*(0x[0-9a-f]+|\d+)\s*$', text))
+nums = {k.lower(): (int(v, 16) if v.lower().startswith('0x') else int(v)) for k, v in nums.items()}
+if 'n' in nums and ('e' in nums or 'c' in nums):
+    n, e = nums['n'], nums.get('e', 65537)
+    notes = [f"n is {n.bit_length()} bits, e = {e}"]
+    if e <= 5:            notes.append("small e → if m^e < n just take the integer e-th root of c; several (n,c) pairs → Håstad broadcast")
+    if e.bit_length() > n.bit_length() * 0.6: notes.append("huge e → small d likely: Wiener / Boneh-Durfee attack")
+    if n.bit_length() < 300: notes.append("n is small → factor it directly: factordb.com or yafu / sympy.factorint")
+    if 'p' in nums or 'q' in nums: notes.append("p or q is given → you can compute d directly: d = pow(e, -1, (p-1)*(q-1))")
+    rule("RSA parameters", "n / e / c found in the text",
+         f"RsaCtfTool -n {str(n)[:12]}… -e {e} --decrypt <c>   # tries every known attack",
+         notes=notes)
+
+if not found and len(tok) >= 16:
+    for name, fn, cmd in [('Base64', d_b64, f'base64 -d {fname}'), ('Base32', d_b32, f'base32 -d {fname}'),
+                          ('Binary (8-bit ASCII)', d_bin, None), ('Hex', d_hex, f'xxd -r -p {fname}'),
+                          ('Decimal ASCII codes', d_dec, None), ('Octal ASCII codes', d_oct, None),
+                          ('Ascii85', d_b85, None), ('Morse code', d_morse, None)]:
+        try: r = fn(text)
+        except Exception: r = None
+        if not r: continue
+        if not printable(r) and name not in ('Base64', 'Base32', 'Hex'): continue
+        if not printable(r):
+            magic = {b'\x00asm': 'WebAssembly', b'\x89PNG': 'PNG', b'PK\x03\x04': 'ZIP', b'\x1f\x8b': 'gzip', b'%PDF': 'PDF',
+                     b'\xff\xd8\xff': 'JPEG', b'\x7fELF': 'ELF', b'BZh': 'bzip2', b'7z\xbc\xaf': '7z'}
+            kind = next((v for k, v in magic.items() if r.startswith(k)), None)
+            if not kind: continue
+            rule(name, f"decodes to a {kind} file", f"{cmd} > decoded.bin && ctf-id decoded.bin")
+            break
+        rule(name, f"decodes to: {preview(r)}", *( [cmd] if cmd else [] ),
+             notes=["decoded output may itself be encoded — CyberChef 'Magic' peels layers"])
+        break
+
+if not found and re.fullmatch(r'[+\-<>\[\].,\s]+', text) and '[' in text:
+    rule("Brainfuck", "esoteric language program", notes=["run it: dcode.fr/brainfuck-language or `beef file`"])
+if not found and re.search(r'(Ook[.?!]\s*){6,}', text):
+    rule("Ook!", "Brainfuck variant", notes=["run it: dcode.fr/ook-language"])
+if not found and text.startswith('begin ') and re.search(r'^end$', text, re.M):
+    rule("uuencode", "old Unix binary-to-text encoding", f"uudecode {fname}")
+if not found and re.fullmatch(r'[​‌‍⁠﻿]+', re.sub(r'[\x20-\x7e\s]', '', text) or 'x'):
+    rule("Zero-width characters", "hidden data between the visible text", notes=["decode: 330k.github.io/misc_tools/unicode_steganography.html"])
+if not found and re.search(r'[ \t]+$', text, re.M) and sum(1 for l in text.splitlines() if re.search(r'[ \t]{3,}$', l)) > 3:
+    rule("Trailing whitespace", "many lines end in spaces/tabs → whitespace stego", f"stegsnow -C {fname}",
+         notes=["or the Whitespace esolang if the file is mostly spaces/tabs"])
+
+COMMON = set('the be to of and a in that have it for not on with he as you do at this but his by from they we '
+             'say her she or an will my one all would there their what so up out if about who get which go me '
+             'is are was were has had been flag key secret password'.split())
+def english(s):
+    w = re.findall(r'[a-z]+', s.lower())
+    return sum(x in COMMON for x in w) / len(w) if len(w) >= 4 else 0
+
+letters = [ch for ch in text.upper() if 'A' <= ch <= 'Z']
+if not found and len(letters) >= 40 and len(letters) / max(len(compact), 1) > 0.7:
+    cnt = collections.Counter(letters); N_ = len(letters)
+    ic = sum(v * (v - 1) for v in cnt.values()) / (N_ * (N_ - 1))
+    best = max(range(26), key=lambda k: english(caesar(text, k)))
+    if english(text) >= 0.15: pass  # already plain English
+    elif english(caesar(text, best)) >= 0.2:
+        rule(f"Caesar / ROT{best}", f"shift {best} gives English: {preview(caesar(text, best))}",
+             f"tr 'A-Za-z' '{(string.ascii_uppercase*2)[best:best+26]}{(string.ascii_lowercase*2)[best:best+26]}' < {fname}")
+    elif ic > 0.055:
+        rule("Monoalphabetic cipher", f"index of coincidence {ic:.3f} ≈ English → Caesar or substitution",
+             notes=["Caesar: try all 25 shifts (CyberChef ROT13 with amount)", "substitution: quipqiup.com solves it by frequency"])
+    elif ic < 0.045:
+        rule("Polyalphabetic cipher", f"index of coincidence {ic:.3f} is flat → Vigenère-like",
+             notes=["find the key length with Kasiski/IoC, then solve: dcode.fr/vigenere-cipher"])
+    else:
+        rule("Classical cipher?", f"letters only, index of coincidence {ic:.3f} (short text → unreliable)",
+             notes=["try in order: Caesar → substitution (quipqiup.com) → Vigenère (dcode.fr)"])
+
+print('\n'.join(out))
+PY
+}
+
+show_analysis(){
+  local kind a b
+  while IFS=$'\t' read -r kind a b; do
+    case "$kind" in
+      F) printf '\n  %s★ FLAG (decoded via %s): %s%s\n' "$B$G" "$a" "$b" "$R" ;;
+      T) tool "$a" "$b" ;;
+      C) cmd "$a" ;;
+      N) note "$a" ;;
+    esac
+  done
+}
 
 inspect(){
   local f="$1"
@@ -211,6 +473,11 @@ PY
 
   *"ASCII text"*|*"Unicode text"*|*"UTF-8"*|*"text"*)
     h "Text → ENCODING / CRYPTO / CODE"
+    local an; an=$(analyze_text "$f")
+    if [ -n "$an" ]; then
+      printf '%s\n' "$an" | show_analysis
+      h "general text tools"
+    fi
     tool "cat/less"   "just read it"; cmd "less $f"
     tool "CyberChef"  "auto-detect encodings (base64/hex/rot/xor)"; cmd "https://gchq.github.io/CyberChef/   # paste, use the 'Magic' op"
     tool "name-that-hash" "identify a hash type"; cmd "nth -f $f"
