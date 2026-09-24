@@ -16,7 +16,7 @@ if [ -t 1 ]; then
   C=$'\e[36m'; Y=$'\e[33m'; G=$'\e[32m'; M=$'\e[35m'; RED=$'\e[31m'
 else B=; DIM=; R=; C=; Y=; G=; M=; RED=; fi
 
-VERSION=1.6.0
+VERSION=2.0.0
 usage(){ cat <<EOF
 usage: ctf-id [options] <file> [file2 ...]
   -q           quick: skip entropy and binwalk
@@ -870,9 +870,12 @@ PY
   # ---- binwalk embedded-file summary (all types, unless -q) ---------------
   if [ "$QUICK" -eq 0 ] && command -v binwalk >/dev/null && [ -f "$f" ]; then
     local bw
-    bw=$(binwalk "$f" 2>/dev/null | awk 'NR>3 && NF' | grep -viE '^$' | head -8)
-    if [ "$(printf '%s\n' "$bw" | wc -l)" -gt 1 ]; then
+    # keep only result rows (they start with the decimal offset) — works for
+    # binwalk v2 and v3, whose headers/footers differ
+    bw=$(binwalk "$f" 2>/dev/null | awk '$1 ~ /^[0-9]+$/ { off=$1; hex=$2; $1=$2=""; sub(/^ +/, ""); printf "%-10s %-10s %s\n", off, hex, $0 }' | head -8)
+    if [ "$(printf '%s' "$bw" | grep -c .)" -gt 1 ]; then
       h "binwalk sees embedded data (extract with: binwalk -e $f)"
+      printf '  %sOFFSET     HEX        WHAT%s\n' "$DIM" "$R"
       printf '%s\n' "$bw" | sed 's/^/  /'
     fi
   fi

@@ -5,20 +5,24 @@ Point it at a CTF challenge file and it tells you **what the file is** and **whi
 ```
 $ ctf-id challenge.png
 ────────────────────────────────────────────────────────
-challenge.png  (48K)
-  file: PNG image data, 800 x 600, 8-bit/color RGBA, non-interlaced
-  mime: image/png   sha256: 3f9a1c0e7b2d44a1…
-  • entropy: 7.91/8.0 (high → compressed/encrypted/packed)
+challenge.png  (73B)
+  file: PNG image data, 4 x 3, 8-bit/color RGB, non-interlaced
+
+▶ Structure check — this file has been tampered with
+  PNG dimensions tampered IHDR CRC doesn't match 4x3 — the real size is 4x6
+     $ printf '\x00\x00\x00\x04\x00\x00\x00\x06' | dd of=challenge.png bs=1 seek=16 conv=notrunc
 
 ▶ Image → STEGANOGRAPHY / METADATA
-  exiftool           metadata, comments, GPS — check FIRST
+✓ exiftool           metadata, comments, GPS — check FIRST
      $ exiftool challenge.png
-  zsteg              LSB stego in PNG/BMP (best first pass)
+✗ zsteg              LSB stego in PNG/BMP (best first pass)
      $ zsteg -a challenge.png
   ...
+▶ suggested tools you don't have yet
+  ✗ zsteg                  gem install zsteg
 ```
 
-`ctf-id` never changes or runs the target file. It only reads it and prints suggestions.
+By default `ctf-id` never changes or runs the target file. It only reads it and prints suggestions. Use `--run` or `--deep` when you want it to do more ([see below](#--run-do-the-first-checks-for-me)).
 
 ## What it does
 
@@ -193,6 +197,10 @@ ctf-id --version
 - Optional: `python3` for entropy, `strings` from binutils for flag search, and `binwalk` for embedded files
 
 Any optional tool that is missing is skipped without an error. `ctf-id` only recommends the other tools; you don't need them installed to run it.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
