@@ -37,7 +37,9 @@ expect "missing file is reported"      "not found:"         -q "$T/nope"
 
 echo "detection"
 expect "plain-text flag is found"      "flag{hello_world}"  -q "$T/flag.txt"
-expect "ELF → reverse engineering"     "ELF binary"         -q /bin/ls
+# /bin/ls is ELF on Linux and Mach-O on macOS
+BIN_KIND="ELF binary"; case "$(file -b /bin/ls)" in *Mach-O*) BIN_KIND="Mach-O" ;; esac
+expect "native binary → reverse eng."  "$BIN_KIND"          -q /bin/ls
 expect "PNG → steganography"           "STEGANOGRAPHY"      -q "$T/img.png"
 expect "ZIP → extract"                 "ZIP archive"        -q "$T/empty.zip"
 expect "random bytes → carve"          "CARVE"              -q "$T/random.bin"
@@ -97,7 +99,7 @@ expect "zip appended after IEND"        "looks like a ZIP"       -q "$T/append.p
 expect "reversed file"                  "Reversed file"          -q "$T/rev.png"
 expect "single-byte XOR"                "0x42"                   -q "$T/xor.png"
 reject "clean PNG → no structure alarm" "Structure check"        -q "$T/good.png"
-reject "ELF → no structure alarm"       "Structure check"        -q /bin/ls
+reject "binary → no structure alarm"       "Structure check"        -q /bin/ls
 
 echo "tool checks"
 expect "--doctor lists tools"           "installed: "            --doctor

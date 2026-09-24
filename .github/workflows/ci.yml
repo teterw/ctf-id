@@ -1,11 +1,20 @@
 name: ci
 on: [push, pull_request]
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: shellcheck
-        run: shellcheck ctf-id install.sh tests/*.sh
+      - run: shellcheck ctf-id install.sh tests/*.sh
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash version
+        run: bash --version | head -1
       - name: tests
         run: tests/run.sh

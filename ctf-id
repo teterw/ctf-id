@@ -151,6 +151,16 @@ install_hint(){
   fi
 }
 
+# ---- portability (GNU coreutils vs macOS/BSD) --------------------------------
+if command -v timeout >/dev/null; then tmo(){ timeout "$@"; }
+elif command -v gtimeout >/dev/null; then tmo(){ gtimeout "$@"; }
+else tmo(){ shift; "$@"; }; fi                     # no timeout available: just run it
+sha256(){ if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
+human(){                                           # bytes → 1.2K / 3.4M, without numfmt
+  awk -v n="$1" 'BEGIN{ split("B K M G T", u); i=1; while (n >= 1024 && i < 5) { n /= 1024; i++ }
+                        printf (i == 1 ? "%d%s" : "%.1f%s"), n, u[i] }'
+}
+
 hr(){ printf '%s\n' "${DIM}────────────────────────────────────────────────────────${R}"; }
 h(){  printf '\n%s\n' "${B}${C}▶ $*${R}"; }
 tool(){                                                        # name  what-it-does
@@ -534,14 +544,14 @@ inspect(){
   [ -e "$f" ] || { echo "${RED}not found: $f${R}"; return; }
 
   local ft; ft=$(file -b "$f" 2>/dev/null)
-  local sz; sz=$(stat -c '%s' "$f" 2>/dev/null)
-  local hsz; hsz=$(numfmt --to=iec "$sz" 2>/dev/null || echo "${sz}B")
+  local sz=0; [ -f "$f" ] && sz=$(wc -c < "$f" | tr -d ' ')
+  local hsz; hsz=$(human "$sz")
   local mime; mime=$(file -b --mime-type "$f" 2>/dev/null)
 
   hr
   printf '%s%s%s  %s(%s)%s\n' "$B$M" "$f" "$R" "$DIM" "$hsz" "$R"
   printf '  %sfile:%s %s\n' "$DIM" "$R" "$ft"
-  printf '  %smime:%s %s   %ssha256:%s %s\n' "$DIM" "$R" "$mime" "$DIM" "$R" "$(sha256sum "$f" 2>/dev/null | cut -c1-16)…"
+  printf '  %smime:%s %s   %ssha256:%s %s\n' "$DIM" "$R" "$mime" "$DIM" "$R" "$(sha256 "$f" 2>/dev/null | cut -c1-16)…"
 
   # ---- entropy + embedded-file peek (skipped with -q) ---------------------
   if [ "$QUICK" -eq 0 ] && [ -f "$f" ]; then
@@ -573,6 +583,12 @@ PY
       h "${RED}Structure check — this file has been tampered with${R}${B}${C}"
       printf '%s\n' "$st" | show_analysis
     fi
+  fi
+
+  # older file(1) versions call Office documents plain zips — look inside
+  if [[ "$ft" == *"Zip archive"* ]] && [ -f "$f" ] &&
+     LC_ALL=C grep -aqE 'word/document\.xml|xl/workbook\.xml|ppt/presentation\.xml' "$f"; then
+    ft="Microsoft OOXML document ($ft)"
   fi
 
   # ============ TYPE-SPECIFIC ADVICE =======================================
@@ -858,13 +874,13 @@ runc(){
   local label="$1" max="$2"; shift 2
   command -v "$1" >/dev/null || { printf '  %s%s: %s not installed, skipped%s\n' "$DIM" "$label" "$1" "$R"; return; }
   printf '  %s%s%s %s$ %s%s\n' "$B" "$label" "$R" "$DIM" "$*" "$R"
-  show_output "$max" "$(timeout 30 "$@" 2>&1 </dev/null)"
+  show_output "$max" "$(tmo 30 "$@" 2>&1 </dev/null)"
 }
 runp(){
   local label="$1" max="$2" need="$3" pipe="$4" file="$5"
   command -v "$need" >/dev/null || { printf '  %s%s: %s not installed, skipped%s\n' "$DIM" "$label" "$need" "$R"; return; }
   printf '  %s%s%s %s$ %s%s\n' "$B" "$label" "$R" "$DIM" "${pipe//\"\$1\"/$file}" "$R"
-  show_output "$max" "$(timeout 30 sh -c "$pipe" _ "$file" 2>&1 </dev/null)"
+  show_output "$max" "$(tmo 30 sh -c "$pipe" _ "$file" 2>&1 </dev/null)"
 }
 show_output(){
   local max="$1" o
@@ -943,13 +959,13 @@ deep_extract(){
   case "$ft" in
     *"Zip archive"*|*"7-zip"*|*"RAR "*|*"gzip"*|*"bzip2"*|*"XZ "*|*"tar archive"*|*cpio*|*"Java archive"*)
       if command -v 7z >/dev/null; then
-        timeout 60 7z x -y -p"" -o"$out" "$f" >/dev/null 2>&1 \
+        tmo 60 7z x -y -p"" -o"$out" "$f" >/dev/null 2>&1 \
           || { [ -z "$(ls -A "$out")" ] && note "--deep: couldn't extract (password protected?) — crack it, then extract by hand"; }
-      elif command -v bsdtar >/dev/null; then timeout 60 bsdtar -xf "$f" -C "$out" 2>/dev/null
+      elif command -v bsdtar >/dev/null; then tmo 60 bsdtar -xf "$f" -C "$out" 2>/dev/null
       fi ;;
     *)
       # anything else: let binwalk carve out embedded files
-      command -v binwalk >/dev/null && (cd "$out" && timeout 60 binwalk -e -C "$out" "$f" >/dev/null 2>&1) ;;
+      command -v binwalk >/dev/null && (cd "$out" && tmo 60 binwalk -e -C "$out" "$f" >/dev/null 2>&1) ;;
   esac
   # ignore binwalk's copy of the whole input and empty files
   local files; files=$(find "$out" -type f -size +0 2>/dev/null | sort | head -n "$DEEP_BUDGET")
