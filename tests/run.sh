@@ -88,6 +88,7 @@ w('badhdr.png', b'\0' * 8 + png[8:])
 w('append.png', png + b'PK\x03\x04secretzipdata')
 w('rev.png', png[::-1])
 w('xor.png', bytes(b ^ 0x42 for b in png))
+w('meta.png', png[:33] + chunk(b'tEXt', b'Comment\0flag{in_the_metadata}') + png[33:])
 PY
 expect "tampered PNG height recovered"  "the real size is 4x6"   -q "$T/tall.png"
 expect "broken PNG signature"           "Broken PNG header"      -q "$T/badhdr.png"
@@ -103,6 +104,14 @@ expect "tools get an installed mark"    "✓ strings"              -q "$T/good.p
 out=$(PATH=/usr/bin:/bin "$CTF_ID" -q "$T/good.png")
 if grep -q "gem install zsteg" <<<"$out" || command -v zsteg >/dev/null; then pass=$((pass+1)); echo "  ok   missing tool gets an install hint"
 else fail=$((fail+1)); echo "  FAIL missing tool gets an install hint"; fi
+
+echo "--run"
+expect "--run section appears"          "quick read-only checks" -q -r /bin/ls
+if command -v exiftool >/dev/null; then
+  expect "--run surfaces metadata flag" "★ possible flag: flag{in_the_metadata}" -q -r "$T/meta.png"
+else
+  expect "--run skips missing tools"    "not installed, skipped" -q -r "$T/meta.png"
+fi
 
 echo
 echo "passed: $pass  failed: $fail"

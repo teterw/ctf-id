@@ -87,6 +87,30 @@ CTF authors often damage a file on purpose so that `file` just reports `data`. `
 | Whole file reversed | detects it and gives a one-liner to reverse it back |
 | Whole file XOR-ed with a single byte | finds the key and gives a one-liner to decode it |
 
+## `--run`: do the first checks for me
+
+By default `ctf-id` never runs anything on the file. With `-r` / `--run`, it also runs the quick, read-only first checks for that file type and shows the results inline. Anything shaped like a flag is highlighted:
+
+| Type | What `--run` runs |
+|---|---|
+| ELF | `checksec`, risky imported functions (`gets`, `strcpy`, `system`…), interesting strings |
+| PNG/BMP | `exiftool` metadata, `zsteg`, `steghide` with an empty password |
+| JPEG/GIF | `exiftool` metadata, `steghide` with an empty password |
+| Audio | `exiftool`, and a spectrogram PNG made with `sox` |
+| PDF | `exiftool`, `pdfdetach -list`, `pdftotext` |
+| pcap | `tshark` protocol breakdown, HTTP requests, FTP/HTTP credentials |
+| Archives | `7z` listing and a count of encrypted entries |
+
+```
+$ ctf-id -r challenge.png
+▶ --run: quick read-only checks
+  exiftool $ exiftool -S -Comment ... challenge.png
+     Comment: flag{in_the_metadata}
+  ★ possible flag: flag{in_the_metadata}
+```
+
+Each command has a 30-second timeout. Output files such as extracted data and spectrograms go into a temporary folder, so the challenge file is never modified.
+
 ## Which tools do you have?
 
 Each suggested tool is marked **✓** if it's installed and **✗** if it isn't. At the end, `ctf-id` lists the missing tools with the install command for your system (`dnf`, `apt`, `pacman` or `brew`, falling back to `pip`, `gem` or a download link):
@@ -126,6 +150,7 @@ You can also download it from the [latest release](https://github.com/teterw/ctf
 ctf-id <file> [file2 ...]   # full analysis
 ctf-id -q <file>            # quick: skip entropy and binwalk
 ctf-id -f PREFIX <file>     # also hunt for PREFIX{...} flags
+ctf-id -r <file>            # also run the quick read-only checks
 ctf-id --doctor             # which suggested tools are installed?
 ctf-id --version
 ```
