@@ -1,0 +1,12 @@
+#compdef ctf-id
+# zsh completion for ctf-id
+_arguments \
+  '-q[quick: skip entropy and binwalk]' \
+  '(-r --run)'{-r,--run}'[run the quick read-only checks]' \
+  '(-d --deep)'{-d,--deep}'[extract nested files and analyse them]' \
+  '-f[extra flag prefix to hunt for]:prefix:(flag CTF picoCTF HTB THM DUCTF)' \
+  '--doctor[list suggested tools and whether they are installed]' \
+  '--update[update ctf-id to the latest release]' \
+  '(-V --version)'{-V,--version}'[print version]' \
+  '(-h --help)'{-h,--help}'[show help]' \
+  '*:file:_files'

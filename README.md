@@ -161,7 +161,7 @@ ctf-id --doctor
 curl -fsSL https://raw.githubusercontent.com/teterw/ctf-id/main/install.sh | bash
 ```
 
-The installer puts `ctf-id` in `~/.local/bin`. Set `PREFIX=/usr/local` (and run it with sudo) to install it system-wide.
+The installer puts `ctf-id` in `~/.local/bin` and installs tab completion for bash and zsh. Set `PREFIX=/usr/local` (and run it with sudo) to install it system-wide.
 
 To install by hand:
 
@@ -169,6 +169,8 @@ To install by hand:
 curl -fsSLO https://raw.githubusercontent.com/teterw/ctf-id/main/ctf-id
 chmod +x ctf-id && mv ctf-id ~/.local/bin/
 ```
+
+To update later, run `ctf-id --update`. It only replaces itself when a newer version is available.
 
 You can also download it from the [latest release](https://github.com/teterw/ctf-id/releases/latest).
 
@@ -181,12 +183,13 @@ ctf-id -f PREFIX <file>     # also hunt for PREFIX{...} flags
 ctf-id -r <file>            # also run the quick read-only checks
 ctf-id -d <file>            # unpack nested archives/embedded files and analyse them too
 ctf-id --doctor             # which suggested tools are installed?
+ctf-id --update             # update to the latest version
 ctf-id --version
 ```
 
 ## Requirements
 
-- Required: `bash`, `file`, and GNU coreutils
+- Required: `bash` (3.2 or newer) and `file`. Works on Linux and macOS, both tested in CI
 - Optional: `python3` for entropy, `strings` from binutils for flag search, and `binwalk` for embedded files
 
 Any optional tool that is missing is skipped without an error. `ctf-id` only recommends the other tools; you don't need them installed to run it.
