@@ -16,18 +16,21 @@ if [ -t 1 ]; then
   C=$'\e[36m'; Y=$'\e[33m'; G=$'\e[32m'; M=$'\e[35m'; RED=$'\e[31m'
 else B=; DIM=; R=; C=; Y=; G=; M=; RED=; fi
 
-VERSION=1.4.0
+VERSION=1.5.0
 usage(){ cat <<EOF
 usage: ctf-id [options] <file> [file2 ...]
   -q           quick: skip entropy and binwalk
   -f PREFIX    flag format to hunt for, e.g. -f DUCTF  (flag/ctf/htb/thm are built in)
   -r, --run    also run the quick read-only checks and show their output
+  -d, --deep   extract archives/embedded files to a temp dir and analyse
+               everything inside (3 levels deep)
   --doctor     list every tool ctf-id can suggest and whether it's installed
   -V           print version
 EOF
 }
 
-QUICK=0; FLAGFMT=""; DOCTOR=0; RUN=0
+QUICK=0; FLAGFMT=""; DOCTOR=0; RUN=0; DEEP=0
+DEPTH=0; MAX_DEPTH=3; DEEP_BUDGET=60   # --deep limits: nesting levels, total files
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help)    usage; exit 0 ;;
@@ -35,6 +38,7 @@ while [ $# -gt 0 ]; do
     -q)           QUICK=1; shift ;;
     --doctor)     DOCTOR=1; shift ;;
     -r|--run)     RUN=1; shift ;;
+    -d|--deep)    DEEP=1; shift ;;
     -f)           FLAGFMT="${2:-}"; shift 2 ;;
     --)           shift; break ;;
     -*)           echo "unknown option: $1"; usage; exit 1 ;;
@@ -393,10 +397,13 @@ PY
 # Broken magic bytes, tampered PNG size, appended data, reversed/XOR'd files.
 analyze_structure(){
   command -v python3 >/dev/null || return 0
-  python3 - "$1" "$1" <<'PY' 2>/dev/null
+  python3 - "$1" "$1" "$2" <<'PY' 2>/dev/null
 import sys, struct, zlib
 
 path, fname = sys.argv[1], sys.argv[2]
+# header/XOR/reversal guesses only when file(1) couldn't identify it at all,
+# otherwise e.g. a tar containing a zip looks like a "broken zip"
+unknown = sys.argv[3].startswith('data') if len(sys.argv) > 3 else True
 with open(path, 'rb') as fh:
     data = fh.read(64 * 1024 * 1024)
 out = []
@@ -418,7 +425,7 @@ def fixcmd(magic, off=0):
 head = starts_known(data)
 
 # ---- 1. damaged header: body says X but the magic bytes are wrong ----------
-if not head and len(data) > 16:
+if unknown and not head and len(data) > 16:
     if data[12:16] == b'IHDR' or (b'IHDR' in data[:64] and b'IEND' in data[-32:]):
         T("Broken PNG header", "IHDR/IEND chunks present but the 8-byte signature is wrong")
         C(fixcmd(b'\x89PNG\r\n\x1a\n'))
@@ -440,7 +447,7 @@ if not head and len(data) > 16:
         C(fixcmd(b'\x7fELF'))
 
 # ---- 2. whole file reversed or XOR'd with one byte -------------------------
-if not head and len(data) > 16:
+if unknown and not head and len(data) > 16:
     rev = starts_known(data[::-1])
     if rev and rev not in ('PE/EXE', 'MP3', 'GIF', 'bzip2'):
         T("Reversed file", f"the bytes read backwards start like a {rev}")
@@ -548,7 +555,7 @@ PY
 
   # ---- structure: is the file lying about what it is? ----------------------
   if [ -f "$f" ]; then
-    local st; st=$(analyze_structure "$f")
+    local st; st=$(analyze_structure "$f" "$ft")
     if [ -n "$st" ]; then
       h "${RED}Structure check — this file has been tampered with${R}${B}${C}"
       printf '%s\n' "$st" | show_analysis
@@ -731,13 +738,17 @@ PY
       printf '%s\n' "$bw" | sed 's/^/  /'
     fi
   fi
+
+  # ---- --deep: extract and recurse (last, so the parent report reads first) -
+  if [ "$DEEP" -eq 1 ] && [ -f "$f" ]; then deep_extract "$f" "$ft"; fi
+  return 0
 }
 
 # ---- --run helpers ----------------------------------------------------------
 RUN_DIR=""
-run_dir(){
+# sets the global RUN_DIR — call it directly, not in $(...), or it's lost
+ensure_run_dir(){
   [ -n "$RUN_DIR" ] || RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ctf-id.XXXXXX")
-  printf '%s' "$RUN_DIR"
 }
 
 # runc <label> <max lines> <command...> — run it with a timeout, show the head
@@ -780,16 +791,16 @@ run_checks(){
       runc exiftool 12 exiftool -S -Comment -Description -Title -Author -Artist -Software -Warning -ImageSize "$f"
       runp zsteg 12 zsteg "zsteg \"\$1\" 2>&1 | grep -vE ' \\.\\.( |\$)|^\\s*\$'" "$f"
       if [[ "$ft" == *bitmap* ]]; then
-        d=$(run_dir)
+        ensure_run_dir; d=$RUN_DIR
         runc "steghide (empty password)" 4 steghide extract -sf "$f" -p "" -xf "$d/steghide.out" -f
       fi ;;
     *"JPEG image"*|*"GIF image"*|*"Web/P"*|*"WebP"*)
       runc exiftool 12 exiftool -S -Comment -Description -Title -Author -Artist -Software -Warning -ImageSize -GPSPosition "$f"
-      d=$(run_dir)
+      ensure_run_dir; d=$RUN_DIR
       runc "steghide (empty password)" 4 steghide extract -sf "$f" -p "" -xf "$d/steghide.out" -f ;;
     *"WAVE"*|*"WAV "*|*"Audio"*|*"FLAC"*|*"Ogg"*)
       runc exiftool 8 exiftool -S -Comment -Title -Artist -Duration "$f"
-      d=$(run_dir)
+      ensure_run_dir; d=$RUN_DIR
       if command -v sox >/dev/null; then
         runc spectrogram 2 sox "$f" -n spectrogram -o "$d/spectrogram.png"
         note "open it: xdg-open $d/spectrogram.png"
@@ -808,6 +819,42 @@ run_checks(){
     *)
       runc exiftool 8 exiftool -S -Comment -Description -Title -Author -Warning "$f" ;;
   esac
+}
+
+# ---- --deep ---------------------------------------------------------------------
+deep_extract(){
+  local f="$1" ft="$2" out n
+  [ "$DEPTH" -ge "$MAX_DEPTH" ] && return
+  [ "$DEEP_BUDGET" -le 0 ] && return
+  ensure_run_dir; out=$(mktemp -d "$RUN_DIR/deep-XXXX")
+  case "$ft" in
+    *"Zip archive"*|*"7-zip"*|*"RAR "*|*"gzip"*|*"bzip2"*|*"XZ "*|*"tar archive"*|*cpio*|*"Java archive"*)
+      if command -v 7z >/dev/null; then
+        timeout 60 7z x -y -p"" -o"$out" "$f" >/dev/null 2>&1 \
+          || { [ -z "$(ls -A "$out")" ] && note "--deep: couldn't extract (password protected?) — crack it, then extract by hand"; }
+      elif command -v bsdtar >/dev/null; then timeout 60 bsdtar -xf "$f" -C "$out" 2>/dev/null
+      fi ;;
+    *)
+      # anything else: let binwalk carve out embedded files
+      command -v binwalk >/dev/null && (cd "$out" && timeout 60 binwalk -e -C "$out" "$f" >/dev/null 2>&1) ;;
+  esac
+  # ignore binwalk's copy of the whole input and empty files
+  local files; files=$(find "$out" -type f -size +0 2>/dev/null | sort | head -n "$DEEP_BUDGET")
+  files=$(printf '%s\n' "$files" | while IFS= read -r x; do
+            [ -n "$x" ] && ! cmp -s "$x" "$f" && printf '%s\n' "$x"; done)
+  n=$(printf '%s' "$files" | grep -c .)
+  [ "$n" -eq 0 ] && { rmdir "$out" 2>/dev/null; return; }
+  h "--deep: $n file(s) extracted from $(basename "$f") → $out"
+  printf '%s\n' "$files" | sed "s|^$out/|  • |"
+  DEPTH=$((DEPTH + 1))
+  local x
+  while IFS= read -r x; do
+    [ "$DEEP_BUDGET" -le 0 ] && { note "--deep: file limit reached, stopping"; break; }
+    DEEP_BUDGET=$((DEEP_BUDGET - 1))
+    printf '\n%s↳ nested (level %d)%s\n' "$DIM" "$DEPTH" "$R"
+    inspect "$x"
+  done <<<"$files"
+  DEPTH=$((DEPTH - 1))
 }
 
 print_missing(){
@@ -836,6 +883,6 @@ fi
 echo "${B}ctf-id${R} ${DIM}— file → suggested tools. Nothing here is run against the target automatically.${R}"
 for f in "$@"; do inspect "$f"; done
 print_missing
-[ -n "$RUN_DIR" ] && echo "${DIM}--run output files are in: $RUN_DIR${R}"
+[ -n "$RUN_DIR" ] && echo "${DIM}--run/--deep output files are in: $RUN_DIR${R}"
 hr
 echo "${DIM}Tip:${R} nested/extracted files? run ${B}ctf-id${R} on them too."

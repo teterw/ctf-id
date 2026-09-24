@@ -111,6 +111,21 @@ $ ctf-id -r challenge.png
 
 Each command has a 30-second timeout. Output files such as extracted data and spectrograms go into a temporary folder, so the challenge file is never modified.
 
+## `--deep`: unpack nested challenges
+
+Some challenges hide a flag inside several layers, for example a tgz containing a tar containing a PNG with a zip appended to it. `-d` / `--deep` extracts each archive (with `7z` or `bsdtar`) or carves out embedded files (with `binwalk`), then runs `ctf-id` on every file it finds, up to 3 levels deep:
+
+```
+$ ctf-id -d challenge.tgz
+▶ --deep: 1 file(s) extracted from challenge.tgz → /tmp/ctf-id.87G1NQ/deep-EuaR
+↳ nested (level 1)  challenge.tar
+↳ nested (level 2)  outer.png   ▶ Structure check — appended data, looks like a ZIP
+↳ nested (level 3)  secret.txt
+  ★ FLAG (decoded via base64): flag{deep_inside}
+```
+
+Everything is extracted into a temporary folder, never next to your file. Each extraction has a timeout, and it stops after 60 files. You can combine it with `--run`: `ctf-id -d -r file`.
+
 ## Which tools do you have?
 
 Each suggested tool is marked **✓** if it's installed and **✗** if it isn't. At the end, `ctf-id` lists the missing tools with the install command for your system (`dnf`, `apt`, `pacman` or `brew`, falling back to `pip`, `gem` or a download link):
@@ -151,6 +166,7 @@ ctf-id <file> [file2 ...]   # full analysis
 ctf-id -q <file>            # quick: skip entropy and binwalk
 ctf-id -f PREFIX <file>     # also hunt for PREFIX{...} flags
 ctf-id -r <file>            # also run the quick read-only checks
+ctf-id -d <file>            # unpack nested archives/embedded files and analyse them too
 ctf-id --doctor             # which suggested tools are installed?
 ctf-id --version
 ```

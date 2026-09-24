@@ -5,6 +5,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 CTF_ID="$PWD/ctf-id"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+export TMPDIR="$T"   # --run/--deep output lands inside $T and is cleaned up with it
 pass=0; fail=0
 
 # expect <description> <needle> <ctf-id args...>
@@ -26,7 +27,7 @@ reject(){
 printf 'flag{hello_world}\n' > "$T/flag.txt"
 printf '\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\1\0\0\0\1\x08\x02\0\0\0\x90wS\xde\0\0\0\x0cIDATx\x9cc\xf8\x0f\0\0\x01\x01\0\x05\x18\xd8N\0\0\0\0IEND\xaeB`\x82' > "$T/img.png"
 printf 'PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' > "$T/empty.zip"
-head -c 4096 /dev/urandom > "$T/random.bin"
+python3 -c "import random,sys; random.seed(7); sys.stdout.buffer.write(bytes([0xde,0xad]) + random.randbytes(4094))" > "$T/random.bin"
 if command -v mkfs.ext4 >/dev/null; then truncate -s 2M "$T/disk.img"; mkfs.ext4 -q "$T/disk.img" 2>/dev/null; fi
 
 echo "cli"
@@ -111,6 +112,16 @@ if command -v exiftool >/dev/null; then
   expect "--run surfaces metadata flag" "★ possible flag: flag{in_the_metadata}" -q -r "$T/meta.png"
 else
   expect "--run skips missing tools"    "not installed, skipped" -q -r "$T/meta.png"
+fi
+
+echo "--deep"
+if command -v 7z >/dev/null || command -v bsdtar >/dev/null; then
+  mkdir -p "$T/nest"
+  printf 'flag{deep_inside}' | base64 > "$T/nest/secret.txt"
+  tar czf "$T/nest/inner.tgz" -C "$T/nest" secret.txt
+  tar cf "$T/nest/outer.tar" -C "$T/nest" inner.tgz
+  expect "--deep finds flag 3 levels down" "flag{deep_inside}" -q -d "$T/nest/outer.tar"
+  reject "tar holding a zip ≠ broken zip"  "Broken ZIP"        -q "$T/nest/outer.tar"
 fi
 
 echo
