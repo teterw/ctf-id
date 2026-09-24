@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+# ctf-id — inspect a file and suggest which tools to use to crack it.
+#
+#   ctf-id <file> [file2 ...]
+#   ctf-id -q <file>     # quick: skip binwalk/entropy (fast)
+#
+# It never modifies the target. It prints: what the file is, notable findings,
+# and a ranked list of tools + copy-paste commands for that file type.
+
+set -uo pipefail
+shopt -s nocasematch
+
+# ---- colours (disabled if not a tty) --------------------------------------
+if [ -t 1 ]; then
+  B=$'\e[1m'; DIM=$'\e[2m'; R=$'\e[0m'
+  C=$'\e[36m'; Y=$'\e[33m'; G=$'\e[32m'; M=$'\e[35m'; RED=$'\e[31m'
+else B=; DIM=; R=; C=; Y=; G=; M=; RED=; fi
+
+VERSION=1.0.0
+usage(){ echo "usage: ctf-id [-q] <file> [file2 ...]   (-q: skip entropy/binwalk, -V: version)"; }
+
+QUICK=0
+case "${1:-}" in
+  -h|--help)    usage; exit 0 ;;
+  -V|--version) echo "ctf-id $VERSION"; exit 0 ;;
+  -q)           QUICK=1; shift ;;
+esac
+[ $# -eq 0 ] && { usage; exit 1; }
+
+hr(){ printf '%s\n' "${DIM}────────────────────────────────────────────────────────${R}"; }
+h(){  printf '\n%s\n' "${B}${C}▶ $*${R}"; }
+tool(){ printf '  %s%-18s%s %s\n' "$B" "$1" "$R" "$2"; }        # name  what-it-does
+cmd(){  printf '     %s$ %s%s\n' "$G" "$*" "$R"; }              # runnable command
+note(){ printf '  %s• %s%s\n' "$Y" "$*" "$R"; }
+
+FLAG_RE='[A-Za-z0-9_]{2,}\{[^}]{2,}\}'   # generic flag{...} / CTF{...} shape
+
+inspect(){
+  local f="$1"
+  [ -e "$f" ] || { echo "${RED}not found: $f${R}"; return; }
+
+  local ft; ft=$(file -b "$f" 2>/dev/null)
+  local sz; sz=$(stat -c '%s' "$f" 2>/dev/null)
+  local hsz; hsz=$(numfmt --to=iec "$sz" 2>/dev/null || echo "${sz}B")
+  local mime; mime=$(file -b --mime-type "$f" 2>/dev/null)
+
+  hr
+  printf '%s%s%s  %s(%s)%s\n' "$B$M" "$f" "$R" "$DIM" "$hsz" "$R"
+  printf '  %sfile:%s %s\n' "$DIM" "$R" "$ft"
+  printf '  %smime:%s %s   %ssha256:%s %s\n' "$DIM" "$R" "$mime" "$DIM" "$R" "$(sha256sum "$f" 2>/dev/null | cut -c1-16)…"
+
+  # ---- entropy + embedded-file peek (skipped with -q) ---------------------
+  if [ "$QUICK" -eq 0 ] && [ -f "$f" ]; then
+    local ent
+    ent=$(python3 - "$f" <<'PY' 2>/dev/null
+import sys,math,collections
+d=open(sys.argv[1],'rb').read(2_000_000)
+if d:
+    c=collections.Counter(d); n=len(d)
+    print(f"{-sum(v/n*math.log2(v/n) for v in c.values()):.2f}")
+PY
+)
+    [ -n "$ent" ] && {
+      local hint=""
+      awk "BEGIN{exit !($ent>7.5)}" && hint=" ${RED}(high → compressed/encrypted/packed)${R}"
+      note "entropy: ${ent}/8.0${hint}"
+    }
+  fi
+
+  # ---- flags / strings quick win ------------------------------------------
+  local hits
+  hits=$(strings -n6 "$f" 2>/dev/null | grep -aoE "$FLAG_RE" | sort -u | head -5)
+  [ -n "$hits" ] && { note "${G}possible flag(s) already in plain strings:${R}"; printf '        %s\n' $hits; }
+
+  # ============ TYPE-SPECIFIC ADVICE =======================================
+  case "$ft" in
+
+  *ELF*)
+    h "ELF binary → REVERSE ENGINEERING / PWN"
+    note "check protections first — it decides the exploit path:"
+    cmd "checksec --file=$f"
+    tool "file/rabin2"  "quick facts, arch, bits, libc calls"
+    cmd "rabin2 -I $f"
+    tool "Ghidra"       "best decompiler (F5-style C output)"
+    cmd "ghidra                 # import $f, double-click main"
+    tool "radare2"      "fast CLI disassembler/debugger"
+    cmd "r2 -AA $f     # then: afl, s main, pdf, VV"
+    tool "gdb + GEF"    "dynamic analysis; GEF auto-loads"
+    cmd "gdb $f        # b main, run, gef commands"
+    tool "strings/ltrace" "cheap wins: hardcoded pw, syscalls"
+    cmd "ltrace ./$(basename "$f")   # watch strcmp() for passwords"
+    if [[ "$ft" == *statically* ]]; then note "statically linked → no libc leak needed, look for ROP"; fi
+    if [[ "$ft" == *"not stripped"* ]]; then note "${G}NOT stripped → function names kept, much easier${R}"; else note "stripped → no symbol names"; fi
+    h "if it's a PWN challenge (talks over a socket):"
+    tool "pwntools"     "write the exploit"
+    cmd "pip install pwntools   # then in python: from pwn import *"
+    tool "ROPgadget"    "find ROP gadgets"
+    cmd "ROPgadget --binary $f | grep ': pop rdi'"
+    tool "one_gadget"   "one-shot execve(/bin/sh) offsets in libc"
+    cmd "one_gadget ./libc.so.6"
+    tool "pwninit"      "auto-patch binary to a given libc (if provided)"
+    ;;
+
+  *"PE32"*|*"MS-DOS"*|*"MSI "*|*"for MS Windows"*)
+    h "Windows executable → REVERSE ENGINEERING"
+    tool "Ghidra"    "decompile (works on PE too)"; cmd "ghidra"
+    tool "radare2"   "disassemble"; cmd "r2 -AA $f"
+    tool "strings"   "look for URLs, keys, flags"; cmd "strings -n8 $f | less"
+    note "if .NET: use ilspycmd/dnSpy instead — Ghidra struggles with IL"
+    ;;
+
+  *"Python script"*|*"python"*|*"byte-compiled"*|*.pyc)
+    h "Python → SOURCE / BYTECODE"
+    if [[ "$ft" == *byte-compiled* || "$f" == *.pyc ]]; then
+      tool "uncompyle6/decompyle3" "turn .pyc back into .py"; cmd "uncompyle6 $f > out.py"
+      note "if it fails, check the magic — may need pycdc for 3.9+"
+    else
+      note "it's plain source — just read it:"; cmd "less $f"
+    fi
+    ;;
+
+  *"Java "*|*"Java archive"*|*"Zip archive"*|*"Android package"*|*"Dalvik"*)
+    if [[ "$ft" == *"Java"* || "$ft" == *"Android"* || "$ft" == *"Dalvik"* || "$f" == *.jar || "$f" == *.apk || "$f" == *.dex ]]; then
+      h "JVM / Android → DECOMPILE"
+      tool "jadx-gui"  "best Java/APK decompiler (GUI)"; cmd "jadx-gui $f"
+      tool "jadx"      "CLI: dump all sources"; cmd "jadx -d out $f"
+      [[ "$f" == *.apk ]] && { tool "apktool" "unpack resources/smali"; cmd "apktool d $f"; }
+    else
+      h "ZIP archive → EXTRACT (maybe password-protected)"
+      tool "7z/unzip"  "list & extract"; cmd "7z l $f"
+      tool "zip2john"  "if encrypted → crack the password"
+      cmd "zip2john $f > hash.txt && john hash.txt"
+      tool "fcrackzip" "alternative zip cracker"; cmd "fcrackzip -u -D -p rockyou.txt $f"
+      note "check for a zip-slip / concatenated data with binwalk (below)"
+    fi
+    ;;
+
+  *"gzip"*|*"bzip2"*|*"XZ "*|*"tar archive"*|*"7-zip"*|*"RAR "*|*"cpio"*|*"ARJ"*)
+    h "Compressed archive → EXTRACT"
+    tool "7z"        "handles almost every format"; cmd "7z x $f"
+    tool "bsdtar"    "one tool for tar/gz/xz/zip"; cmd "bsdtar xvf $f"
+    note "nested archives are common — extract, then run ctf-id on the result"
+    ;;
+
+  *"PNG image"*|*"JPEG image"*|*"GIF image"*|*"bitmap"*|*"PC bitmap"*|*"Web/P"*|*"WebP"*)
+    h "Image → STEGANOGRAPHY / METADATA"
+    tool "exiftool"   "metadata, comments, GPS — check FIRST"; cmd "exiftool $f"
+    tool "strings"    "flags hidden as plain text"; cmd "strings $f | grep -iE 'flag|ctf|\\{'"
+    tool "binwalk"    "files hidden after the image data"; cmd "binwalk -e $f"
+    tool "zsteg"      "LSB stego in PNG/BMP (best first pass)"; cmd "zsteg -a $f"
+    tool "steghide"   "JPEG/BMP/WAV with a passphrase"; cmd "steghide extract -sf $f     # try empty pw first"
+    tool "stegsolve"  "GUI: flip through bit-planes/channels"; cmd "java -jar stegsolve.jar   # open $f"
+    tool "stegseek"   "fast steghide passphrase bruteforce"; cmd "stegseek $f rockyou.txt"
+    note "PNG-specific: check for corrupt CRC / wrong dimensions (pngcheck)"
+    ;;
+
+  *"WAVE"*|*"WAV "*|*"Audio"*|*"MPEG"*"layer III"*|*"FLAC"*|*"Ogg"*)
+    h "Audio → STEGO / SPECTROGRAM"
+    tool "Audacity/sox" "look at the SPECTROGRAM — flags are often drawn there"
+    cmd "sox $f -n spectrogram -o spec.png  &&  xdg-open spec.png"
+    tool "steghide"   "hidden data w/ passphrase"; cmd "steghide extract -sf $f"
+    tool "exiftool"   "tags/metadata"; cmd "exiftool $f"
+    note "DTMF tones? morse? slow-scan TV? listen first"
+    ;;
+
+  *"PDF"*)
+    h "PDF → METADATA / HIDDEN CONTENT / CRACK"
+    tool "exiftool"   "author, tools, hidden fields"; cmd "exiftool $f"
+    tool "pdftotext"  "pull all text (may be white-on-white)"; cmd "pdftotext $f - | less"
+    tool "pdf-parser/peepdf" "objects, JS, embedded files"; cmd "pdfdetach -list $f"
+    tool "binwalk"    "files appended after %%EOF"; cmd "binwalk -e $f"
+    tool "pdf2john"   "if it's password-protected"; cmd "pdf2john.pl $f > h.txt && john h.txt"
+    tool "qpdf"       "decrypt once you know the pw"; cmd "qpdf --password=PW --decrypt $f out.pdf"
+    ;;
+
+  *"pcap"*|*"tcpdump"*|*"capture file"*|*"pcapng"*)
+    h "Network capture → TRAFFIC ANALYSIS"
+    tool "Wireshark"  "GUI: Follow TCP Stream, File>Export Objects"; cmd "wireshark $f"
+    tool "tshark"     "CLI filtering / field extraction"; cmd "tshark -r $f -Y http.request -T fields -e http.host -e http.request.uri"
+    tool "strings"    "quick grep for creds/flags"; cmd "strings $f | grep -iE 'flag|pass|user'"
+    tool "tcpflow"    "reassemble streams to files"; cmd "tcpflow -r $f"
+    note "USB pcap? extract HID keystrokes. Export HTTP objects for files."
+    ;;
+
+  *"private key"*|*"public key"*|*"OpenSSH"*|*"PEM "*|*certificate*)
+    h "Key / certificate → CRYPTO"
+    tool "RsaCtfTool" "attack weak RSA (small n, common factors…)"; cmd "RsaCtfTool --publickey $f --private"
+    tool "openssl"    "inspect the key/cert"; cmd "openssl rsa -in $f -text -noout"
+    tool "ssh2john"   "crack a passphrase-protected SSH key"; cmd "ssh2john.py $f > h.txt && john h.txt"
+    ;;
+
+  *"filesystem"*|*"ext2"*|*"ext4"*|*"boot sector"*|*"disk image"*|*"QEMU"*)
+    h "Disk / filesystem image → FORENSICS"
+    tool "sleuthkit"  "fls/icat: list & recover files, incl. deleted"; cmd "fls -r $f    # then: icat $f <inode> > file"
+    tool "testdisk"   "recover partitions/files (GUI-ish)"; cmd "testdisk $f"
+    tool "mount"      "loop-mount and browse"; cmd "mkdir m && sudo mount -o loop,ro $f m"
+    tool "binwalk"    "carve embedded content"; cmd "binwalk -e $f"
+    note "memory dump instead? → volatility3 -f $f windows.info"
+    ;;
+
+  *"data"*|*"raw"*)
+    h "Unknown / raw data → CARVE & IDENTIFY"
+    note "'data' means file(1) couldn't ID it — inspect the bytes yourself:"
+    tool "xxd"        "look at the header magic bytes"; cmd "xxd $f | head"
+    tool "binwalk"    "find embedded/known signatures"; cmd "binwalk $f"
+    tool "foremost"   "carve out known file types"; cmd "foremost -i $f -o carved/"
+    tool "hexedit"    "edit magic bytes if header is corrupt"; cmd "hexedit $f"
+    note "high entropy above? likely encrypted/packed. Low? maybe text encoding."
+    note "try: base64 -d, xxd -r -p, or ${B}CyberChef${R} (gchq.github.io/CyberChef) with 'Magic'"
+    ;;
+
+  *"ASCII text"*|*"Unicode text"*|*"UTF-8"*|*"text"*)
+    h "Text → ENCODING / CRYPTO / CODE"
+    tool "cat/less"   "just read it"; cmd "less $f"
+    tool "CyberChef"  "auto-detect encodings (base64/hex/rot/xor)"; cmd "https://gchq.github.io/CyberChef/   # paste, use the 'Magic' op"
+    tool "name-that-hash" "identify a hash type"; cmd "nth -f $f"
+    tool "ciphey/xortool" "auto-decrypt classic ciphers / xor"; cmd "xortool $f"
+    note "looks like a hash? → hashcat/john. Looks like a cipher? → CyberChef/dcode.fr"
+    note "RSA key/params (n, e, c)? →  RsaCtfTool --publickey key.pub --private"
+    ;;
+
+
+
+  *)
+    h "No specific rule matched — general toolkit"
+    tool "binwalk"   "find anything embedded"; cmd "binwalk -e $f"
+    tool "foremost"  "carve known file types"; cmd "foremost -i $f -o carved/"
+    tool "strings"   "readable text / flags"; cmd "strings -n6 $f | grep -iE 'flag|ctf|\\{'"
+    tool "xxd"       "inspect header bytes"; cmd "xxd $f | head"
+    tool "CyberChef" "throw it at the 'Magic' operation"; cmd "https://gchq.github.io/CyberChef/"
+    ;;
+  esac
+
+  # ---- binwalk embedded-file summary (all types, unless -q) ---------------
+  if [ "$QUICK" -eq 0 ] && command -v binwalk >/dev/null && [ -f "$f" ]; then
+    local bw
+    bw=$(binwalk "$f" 2>/dev/null | awk 'NR>3 && NF' | grep -viE '^$' | head -8)
+    if [ "$(printf '%s\n' "$bw" | wc -l)" -gt 1 ]; then
+      h "binwalk sees embedded data (extract with: binwalk -e $f)"
+      printf '%s\n' "$bw" | sed 's/^/  /'
+    fi
+  fi
+}
+
+echo "${B}ctf-id${R} ${DIM}— file → suggested tools. Nothing here is run against the target automatically.${R}"
+for f in "$@"; do inspect "$f"; done
+hr
+echo "${DIM}Tip:${R} nested/extracted files? run ${B}ctf-id${R} on them too."
