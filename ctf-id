@@ -24,9 +24,31 @@ usage: ctf-id [options] <file> [file2 ...]
   -r, --run    also run the quick read-only checks and show their output
   -d, --deep   extract archives/embedded files to a temp dir and analyse
                everything inside (3 levels deep)
+  --update     replace this script with the latest version from GitHub
   --doctor     list every tool ctf-id can suggest and whether it's installed
   -V           print version
 EOF
+}
+
+REPO_RAW="https://raw.githubusercontent.com/teterw/ctf-id/main"
+version_gt(){   # is $1 newer than $2? (x.y.z)
+  awk -v a="$1" -v b="$2" 'BEGIN{ split(a, x, "."); split(b, y, ".")
+    for (i = 1; i <= 3; i++) { if (x[i] + 0 > y[i] + 0) exit 0; if (x[i] + 0 < y[i] + 0) exit 1 } exit 1 }'
+}
+self_update(){
+  local self tmp new
+  self=$(command -v "$0" 2>/dev/null || printf '%s' "$0")
+  [ -w "$self" ] || { echo "can't write $self — rerun with sudo, or reinstall with install.sh"; return 1; }
+  command -v curl >/dev/null || { echo "curl is needed for --update"; return 1; }
+  tmp=$(mktemp "${TMPDIR:-/tmp}/ctf-id.update.XXXXXX")
+  curl -fsSL "$REPO_RAW/ctf-id" -o "$tmp" || { rm -f "$tmp"; echo "download failed"; return 1; }
+  # sanity-check before replacing ourselves
+  if ! bash -n "$tmp" || ! head -1 "$tmp" | grep -q bash; then
+    rm -f "$tmp"; echo "downloaded file looks wrong, not updating"; return 1
+  fi
+  new=$(grep -m1 '^VERSION=' "$tmp" | cut -d= -f2)
+  if ! version_gt "$new" "$VERSION"; then rm -f "$tmp"; echo "ctf-id $VERSION is already the latest"; return 0; fi
+  chmod +x "$tmp" && mv "$tmp" "$self" && echo "updated ctf-id $VERSION → $new"
 }
 
 QUICK=0; FLAGFMT=""; DOCTOR=0; RUN=0; DEEP=0
@@ -37,6 +59,7 @@ while [ $# -gt 0 ]; do
     -V|--version) echo "ctf-id $VERSION"; exit 0 ;;
     -q)           QUICK=1; shift ;;
     --doctor)     DOCTOR=1; shift ;;
+    --update)     self_update; exit $? ;;
     -r|--run)     RUN=1; shift ;;
     -d|--deep)    DEEP=1; shift ;;
     -f)           FLAGFMT="${2:-}"; shift 2 ;;
@@ -572,8 +595,8 @@ PY
   fi
 
   # ---- flags / strings quick win ------------------------------------------
-  local hits
-  hits=$(strings -n6 "$f" 2>/dev/null | grep -aoE "$FLAG_RE" | sort -u | head -5)
+  local hits=""
+  [ -f "$f" ] && hits=$(LC_ALL=C grep -aoE "$FLAG_RE" "$f" 2>/dev/null | sort -u | head -5)
   [ -n "$hits" ] && { note "${G}possible flag(s) already in plain strings:${R}"; printf '%s\n' "$hits" | sed 's/^/        /'; }
 
   # ---- structure: is the file lying about what it is? ----------------------
