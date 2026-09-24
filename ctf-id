@@ -16,32 +16,134 @@ if [ -t 1 ]; then
   C=$'\e[36m'; Y=$'\e[33m'; G=$'\e[32m'; M=$'\e[35m'; RED=$'\e[31m'
 else B=; DIM=; R=; C=; Y=; G=; M=; RED=; fi
 
-VERSION=1.2.0
+VERSION=1.3.0
 usage(){ cat <<EOF
 usage: ctf-id [options] <file> [file2 ...]
   -q           quick: skip entropy and binwalk
   -f PREFIX    flag format to hunt for, e.g. -f DUCTF  (flag/ctf/htb/thm are built in)
+  --doctor     list every tool ctf-id can suggest and whether it's installed
   -V           print version
 EOF
 }
 
-QUICK=0; FLAGFMT=""
+QUICK=0; FLAGFMT=""; DOCTOR=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help)    usage; exit 0 ;;
     -V|--version) echo "ctf-id $VERSION"; exit 0 ;;
     -q)           QUICK=1; shift ;;
+    --doctor)     DOCTOR=1; shift ;;
     -f)           FLAGFMT="${2:-}"; shift 2 ;;
     --)           shift; break ;;
     -*)           echo "unknown option: $1"; usage; exit 1 ;;
     *)            break ;;
   esac
 done
-[ $# -eq 0 ] && { usage; exit 1; }
+[ $# -eq 0 ] && [ "$DOCTOR" -eq 0 ] && { usage; exit 1; }
+
+# ---- tool database -----------------------------------------------------------
+# name | binaries (any one = installed) | apt | dnf | pacman | brew | other install
+# "-" = not packaged there; "~" = not a local tool (website), never marked.
+# shellcheck disable=SC2016  # install hints are printed literally
+TOOLS_DB='
+7z|7z 7za|p7zip-full|p7zip|7zip|p7zip|-
+7z/unzip|7z 7za unzip|p7zip-full|p7zip|7zip|p7zip|-
+apktool|apktool|apktool|-|android-apktool|apktool|https://apktool.org/docs/install
+audacity/sox|sox audacity|sox|sox|sox|sox|-
+binwalk|binwalk|binwalk|binwalk|binwalk|binwalk|pip install binwalk
+bsdtar|bsdtar|libarchive-tools|bsdtar|libarchive|libarchive|-
+cat/less|less|less|less|less|less|-
+checksec|checksec|checksec|checksec|checksec|checksec|pip install checksec.py
+ciphey/xortool|xortool ciphey|-|-|-|-|pip install xortool
+cyberchef|~|-|-|-|-|-
+exiftool|exiftool|libimage-exiftool-perl|perl-Image-ExifTool|perl-image-exiftool|exiftool|-
+fcrackzip|fcrackzip|fcrackzip|fcrackzip|fcrackzip|fcrackzip|-
+file/rabin2|rabin2|radare2|radare2|radare2|radare2|-
+foremost|foremost|foremost|foremost|foremost|foremost|-
+gdb + gef|gdb|gdb|gdb|gdb|gdb|GEF: bash -c "$(curl -fsSL https://gef.blah.cat/sh)"
+ghidra|ghidra ghidraRun analyzeHeadless|-|-|ghidra|ghidra|https://github.com/NationalSecurityAgency/ghidra/releases
+hexedit|hexedit|hexedit|hexedit|hexedit|hexedit|-
+jadx|jadx|jadx|-|jadx|jadx|https://github.com/skylot/jadx/releases
+jadx-gui|jadx-gui|jadx|-|jadx|jadx|https://github.com/skylot/jadx/releases
+mount|mount|mount|util-linux|util-linux|-|-
+name-that-hash|nth name-that-hash|-|-|-|-|pip install name-that-hash
+one_gadget|one_gadget|-|-|-|-|gem install one_gadget
+openssl|openssl|openssl|openssl|openssl|openssl|-
+pdf2john|pdf2john pdf2john.pl pdf2john.py|john|john|john|john-jumbo|john-jumbo: https://github.com/openwall/john
+pdf-parser/peepdf|pdf-parser pdf-parser.py peepdf pdfdetach|poppler-utils|poppler-utils|poppler|poppler|pip install peepdf-3
+pdftotext|pdftotext|poppler-utils|poppler-utils|poppler|poppler|-
+pwninit|pwninit|-|-|-|-|cargo install pwninit
+pwntools|py:pwn|-|-|-|-|pip install pwntools
+qpdf|qpdf|qpdf|qpdf|qpdf|qpdf|-
+radare2|r2 radare2|radare2|radare2|radare2|radare2|-
+ropgadget|ROPgadget|-|-|ropgadget|-|pip install ROPgadget
+rsactftool|RsaCtfTool rsactftool|-|-|-|-|pipx install git+https://github.com/RsaCtfTool/RsaCtfTool
+sleuthkit|fls icat|sleuthkit|sleuthkit|sleuthkit|sleuthkit|-
+ssh2john|ssh2john ssh2john.py|john|john|john|john-jumbo|john-jumbo: https://github.com/openwall/john
+steghide|steghide|steghide|steghide|-|-|-
+stegseek|stegseek|-|-|-|-|https://github.com/RickdeJager/stegseek/releases
+stegsolve|stegsolve|-|-|-|-|https://github.com/Giotino/stegsolve/releases
+strings|strings|binutils|binutils|binutils|binutils|-
+strings/ltrace|ltrace|ltrace|ltrace|ltrace|-|-
+tcpflow|tcpflow|tcpflow|tcpflow|tcpflow|tcpflow|-
+testdisk|testdisk|testdisk|testdisk|testdisk|testdisk|-
+tshark|tshark|tshark|wireshark-cli|wireshark-cli|wireshark|-
+uncompyle6/decompyle3|uncompyle6 decompyle3 pycdc|-|-|-|-|pip install uncompyle6 decompyle3
+volatility3|vol vol.py volatility3|-|-|-|-|pip install volatility3
+wireshark|wireshark|wireshark|wireshark|wireshark-qt|wireshark|-
+xxd|xxd|xxd|vim-common|xxd|vim|-
+zip2john|zip2john|john|john|john|john-jumbo|john-jumbo: https://github.com/openwall/john
+zsteg|zsteg|-|-|-|-|gem install zsteg
+'
+
+PM=""
+for p in dnf apt-get pacman brew; do command -v "$p" >/dev/null && { PM=$p; break; }; done
+MISSING=""        # newline-separated db keys of suggested-but-missing tools
+CHECKED=""        # "key=1" / "key=0" cache
+
+db_row(){ printf '%s\n' "$TOOLS_DB" | grep -i -m1 "^$1|"; }
+
+# have <db key> → 0 installed, 1 missing, 2 unknown/not-a-local-tool
+have(){
+  local key; key=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$CHECKED" in *"|$key=1|"*) return 0 ;; *"|$key=0|"*) return 1 ;; esac
+  local row bins b; row=$(db_row "$key") || return 2
+  bins=$(printf '%s' "$row" | cut -d'|' -f2)
+  [ "$bins" = "~" ] && return 2
+  for b in $bins; do
+    if [[ "$b" == py:* ]]; then python3 -c "import ${b#py:}" 2>/dev/null && { CHECKED="$CHECKED|$key=1|"; return 0; }
+    elif command -v "$b" >/dev/null; then CHECKED="$CHECKED|$key=1|"; return 0; fi
+  done
+  CHECKED="$CHECKED|$key=0|"; return 1
+}
+
+# install hint for one db key, for this machine's package manager
+install_hint(){
+  local row col pkg other; row=$(db_row "$1") || return
+  case "$PM" in apt-get) col=3 ;; dnf) col=4 ;; pacman) col=5 ;; brew) col=6 ;; *) col=0 ;; esac
+  pkg=-; [ "$col" -gt 0 ] && pkg=$(printf '%s' "$row" | cut -d'|' -f"$col")
+  other=$(printf '%s' "$row" | cut -d'|' -f7)
+  if [ "$pkg" != "-" ]; then
+    case "$PM" in
+      apt-get) echo "sudo apt install $pkg" ;; dnf) echo "sudo dnf install $pkg" ;;
+      pacman)  echo "sudo pacman -S $pkg" ;;   brew) echo "brew install $pkg" ;;
+    esac
+  elif [ "$other" != "-" ]; then echo "$other"
+  fi
+}
 
 hr(){ printf '%s\n' "${DIM}────────────────────────────────────────────────────────${R}"; }
 h(){  printf '\n%s\n' "${B}${C}▶ $*${R}"; }
-tool(){ printf '  %s%-18s%s %s\n' "$B" "$1" "$R" "$2"; }        # name  what-it-does
+tool(){                                                        # name  what-it-does
+  local mark="  "
+  have "$1"; case $? in
+    0) mark="${G}✓${R} " ;;
+    1) mark="${RED}✗${R} "
+       case $'\n'"$MISSING"$'\n' in *$'\n'"$1"$'\n'*) ;; *) MISSING="$MISSING"$'\n'"$1" ;; esac ;;
+  esac
+  printf '%s%s%-18s%s %s\n' "$mark" "$B" "$1" "$R" "$2"
+}
+finding(){ printf '  %s%-18s%s %s\n' "$B" "$1" "$R" "$2"; }     # analysis result, not a tool
 cmd(){  printf '     %s$ %s%s\n' "$G" "$*" "$R"; }              # runnable command
 note(){ printf '  %s• %s%s\n' "$Y" "$*" "$R"; }
 
@@ -398,7 +500,7 @@ show_analysis(){
   while IFS=$'\t' read -r kind a b; do
     case "$kind" in
       F) printf '\n  %s★ FLAG (decoded via %s): %s%s\n' "$B$G" "$a" "$b" "$R" ;;
-      T) tool "$a" "$b" ;;
+      T) finding "$a" "$b" ;;
       C) cmd "$a" ;;
       N) note "$a" ;;
     esac
@@ -626,7 +728,31 @@ PY
   fi
 }
 
+print_missing(){
+  [ -z "${MISSING//$'\n'/}" ] && return
+  h "suggested tools you don't have yet"
+  local k hint
+  while IFS= read -r k; do
+    [ -z "$k" ] && continue
+    hint=$(install_hint "$k")
+    printf '  %s✗%s %-22s %s%s%s\n' "$RED" "$R" "$k" "$DIM" "${hint:-(see the project website)}" "$R"
+  done <<<"$MISSING"
+}
+
+if [ "$DOCTOR" -eq 1 ]; then
+  echo "${B}ctf-id --doctor${R} ${DIM}— package manager: ${PM:-none detected}${R}"
+  n_ok=0; n_miss=0
+  while IFS='|' read -r key bins _; do
+    [ -z "$key" ] || [ "$bins" = "~" ] && continue
+    if have "$key"; then n_ok=$((n_ok+1)); printf '  %s✓%s %s\n' "$G" "$R" "$key"
+    else n_miss=$((n_miss+1)); printf '  %s✗%s %-22s %s%s%s\n' "$RED" "$R" "$key" "$DIM" "$(install_hint "$key")" "$R"; fi
+  done <<<"$TOOLS_DB"
+  echo; echo "installed: $n_ok  missing: $n_miss"
+  exit 0
+fi
+
 echo "${B}ctf-id${R} ${DIM}— file → suggested tools. Nothing here is run against the target automatically.${R}"
 for f in "$@"; do inspect "$f"; done
+print_missing
 hr
 echo "${DIM}Tip:${R} nested/extracted files? run ${B}ctf-id${R} on them too."

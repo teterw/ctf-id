@@ -97,6 +97,13 @@ expect "single-byte XOR"                "0x42"                   -q "$T/xor.png"
 reject "clean PNG → no structure alarm" "Structure check"        -q "$T/good.png"
 reject "ELF → no structure alarm"       "Structure check"        -q /bin/ls
 
+echo "tool checks"
+expect "--doctor lists tools"           "installed: "            --doctor
+expect "tools get an installed mark"    "✓ strings"              -q "$T/good.png"
+out=$(PATH=/usr/bin:/bin "$CTF_ID" -q "$T/good.png")
+if grep -q "gem install zsteg" <<<"$out" || command -v zsteg >/dev/null; then pass=$((pass+1)); echo "  ok   missing tool gets an install hint"
+else fail=$((fail+1)); echo "  FAIL missing tool gets an install hint"; fi
+
 echo
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]

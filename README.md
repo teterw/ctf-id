@@ -87,6 +87,22 @@ CTF authors often damage a file on purpose so that `file` just reports `data`. `
 | Whole file reversed | detects it and gives a one-liner to reverse it back |
 | Whole file XOR-ed with a single byte | finds the key and gives a one-liner to decode it |
 
+## Which tools do you have?
+
+Each suggested tool is marked **✓** if it's installed and **✗** if it isn't. At the end, `ctf-id` lists the missing tools with the install command for your system (`dnf`, `apt`, `pacman` or `brew`, falling back to `pip`, `gem` or a download link):
+
+```
+▶ suggested tools you don't have yet
+  ✗ zsteg                  gem install zsteg
+  ✗ stegseek               https://github.com/RickdeJager/stegseek/releases
+```
+
+To check your whole setup before a CTF:
+
+```bash
+ctf-id --doctor
+```
+
 ## Install
 
 ```bash
@@ -110,6 +126,7 @@ You can also download it from the [latest release](https://github.com/teterw/ctf
 ctf-id <file> [file2 ...]   # full analysis
 ctf-id -q <file>            # quick: skip entropy and binwalk
 ctf-id -f PREFIX <file>     # also hunt for PREFIX{...} flags
+ctf-id --doctor             # which suggested tools are installed?
 ctf-id --version
 ```
 
